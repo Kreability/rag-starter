@@ -1,0 +1,19 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@frontend/types": "workspace:^",
+    "@frontend/ui": "workspace:^",
+    "next": "^16.0.10"
+  },
+  "devDependencies": {
+    "typescript": "5.7.2"
+  }
+}
