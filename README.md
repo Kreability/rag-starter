@@ -164,6 +164,11 @@ make down     # stop and remove containers (data volumes kept)
 make clean    # also delete all data: Postgres, Qdrant, MinIO, Redis
 ```
 
+`make clean` wipes every document, vector, and user account. That is recoverable:
+on the next boot `init_rag` recreates the S3 bucket, the Qdrant collection, and
+the dev user from `DEV_USERNAME` / `DEV_PASSWORD`, so the stack comes back
+usable without any manual step. Your **documents are not recoverable** — re-upload them.
+
 Services are declared `restart: unless-stopped`, so they return automatically when the Docker daemon restarts. **`docker compose stop` does not survive a daemon restart — use `down`** if you want them to stay off.
 
 ---
@@ -388,7 +393,13 @@ Ported from [stackitcloud/rag-template](https://github.com/stackitcloud/rag-temp
 
 Built on the [unfoldadmin/turbo](https://github.com/unfoldadmin/turbo) Django + Next.js boilerplate (MIT), which provides the monorepo layout, JWT setup, and Unfold admin theme.
 
-See `LICENSE.md`.
+This project is released under the MIT License — see [`LICENSE`](LICENSE). Because parts of the RAG pipeline are derived from Apache-2.0 code, [`NOTICE`](NOTICE) records both upstream attributions, lists the derived files, and states the changes made. A copy of the Apache License 2.0 is at [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for dev setup, tests, and code style, and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
+To report a security vulnerability, follow [`SECURITY.md`](SECURITY.md) — please do not open a public issue.
 
 ---
 

@@ -2,6 +2,8 @@ import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
 import { twMerge } from 'tailwind-merge'
 
+import { AuthProvider } from '@/providers/auth-provider'
+
 import '@frontend/ui/styles/globals.css'
 
 const inter = Inter({ subsets: ['latin'] })
@@ -23,9 +25,11 @@ export default function RootLayout({
           inter.className
         )}
       >
-        <div className="px-6">
-          <div className="container mx-auto my-12 max-w-6xl">{children}</div>
-        </div>
+        <AuthProvider>
+          <div className="px-6">
+            <div className="container mx-auto my-12 max-w-6xl">{children}</div>
+          </div>
+        </AuthProvider>
       </body>
     </html>
   )

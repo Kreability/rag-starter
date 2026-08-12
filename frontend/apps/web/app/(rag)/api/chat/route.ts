@@ -1,11 +1,12 @@
 /**
  * Streaming chat proxy.
  *
- * Attaches the server-side dev token and pipes Django's server-sent events
- * straight through to the browser.
+ * Attaches the caller's token — the shared dev account under DEV_MODE,
+ * otherwise their own session — and pipes Django's server-sent events straight
+ * through to the browser.
  */
 
-import { clearToken, getAccessToken } from '@/lib/token'
+import { clearToken, DEV_MODE, getApiToken, UnauthenticatedError } from '@/lib/token'
 
 // Streaming must not be statically optimised or buffered.
 export const dynamic = 'force-dynamic'
@@ -26,7 +27,7 @@ export async function POST(request: Request) {
     fetch(`${API_URL}/api/chat/ask/`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${await getAccessToken()}`,
+        Authorization: `Bearer ${await getApiToken()}`,
         'Content-Type': 'application/json'
       },
       body
@@ -35,12 +36,15 @@ export async function POST(request: Request) {
   let upstream: Response
   try {
     upstream = await send()
-    // A stale cached token is recoverable: drop it and retry once.
-    if (upstream.status === 401) {
+    // Only the DEV_MODE token is cached here, so only it can be stale.
+    if (upstream.status === 401 && DEV_MODE) {
       clearToken()
       upstream = await send()
     }
   } catch (error) {
+    if (error instanceof UnauthenticatedError) {
+      return Response.json({ error: 'Your session has expired.' }, { status: 401 })
+    }
     return Response.json(
       { error: error instanceof Error ? error.message : 'Could not reach the API.' },
       { status: 502 }

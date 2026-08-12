@@ -13,6 +13,7 @@ services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
+    mem_limit: 768m
     expose:
       - "5432"
     ports:
@@ -41,6 +42,7 @@ services:
     # (or a wiped volume), so change both together, deliberately.
     image: qdrant/qdrant:v1.12.6
     restart: unless-stopped
+    mem_limit: 1g
     expose:
       - "6333"
       - "6334"
@@ -66,6 +68,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: 768m
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     expose:
       - "6379"
@@ -81,6 +84,7 @@ services:
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     restart: unless-stopped
+    mem_limit: 512m
     command: server /data --console-address ":9001"
     expose:
       - "9000"
@@ -104,12 +108,20 @@ services:
       context: backend
       target: development
     restart: unless-stopped
+    mem_limit: 1g
     command: >
       bash -c "uv sync &&
                uv run -- python manage.py migrate &&
                uv run -- python manage.py init_rag --wait 60 &&
                uv run -- python manage.py runserver 0.0.0.0:8000"
-    <<: *backend-env
+    env_file:
+      - .env.backend
+      # Also read the frontend's dev credentials so `init_rag` can recreate the
+      # account the frontend signs in as. Keeping them in one file avoids the
+      # two copies drifting apart. Harmless in production: without DEV_PASSWORD
+      # the step is skipped.
+      - path: .env.frontend
+        required: false
     expose:
       - "8000"
     ports:
@@ -121,15 +133,23 @@ services:
       # from api and worker, which fails on startup.
       - model-cache:/root/.cache/huggingface
       - flashrank-cache:/tmp/flashrank
+    healthcheck:
+      # `start_period` is generous: the dev command runs `uv sync` and migrations
+      # before Django listens, and failures during it do not count as retries.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/health/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
 
   # Same image, same codebase, different command. Not a microservice.
   worker:
@@ -137,6 +157,7 @@ services:
       context: backend
       target: development
     restart: unless-stopped
+    mem_limit: 2g
     command: >
       bash -c "uv sync &&
                uv run -- celery -A api worker --loglevel=INFO --concurrency=2"
@@ -148,15 +169,22 @@ services:
       # from api and worker, which fails on startup.
       - model-cache:/root/.cache/huggingface
       - flashrank-cache:/tmp/flashrank
+    healthcheck:
+      # `celery inspect ping` fails until the worker has registered with the broker.
+      test: ["CMD-SHELL", "uv run -- celery -A api inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
 
   # Periodic jobs (reaps documents stuck in PROCESSING).
   beat:
@@ -164,6 +192,7 @@ services:
       context: backend
       target: development
     restart: unless-stopped
+    mem_limit: 256m
     command: >
       bash -c "uv sync &&
                uv run -- celery -A api beat --loglevel=INFO"
@@ -179,6 +208,7 @@ services:
     build:
       context: frontend
     restart: unless-stopped
+    mem_limit: 1g
     command: bash -c "pnpm install -r && pnpm --filter web dev"
     volumes:
       - ./frontend:/app
@@ -189,8 +219,24 @@ services:
       - "${WEB_HOST_PORT:-3000}:3000"
     env_file:
       - .env.frontend
+    healthcheck:
+      # node:*-slim ships neither curl nor wget, so probe with node itself.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # First boot runs `pnpm install` for the whole workspace.
+      start_period: 240s
     depends_on:
-      - api
+      api:
+        # Wait for Django to actually answer, not merely for the container to
+        # exist: the frontend's server components call the API while rendering,
+        # so starting early produces a page full of connection errors.
+        condition: service_healthy
 
   # ------------------------------------------- observability (optional) ---
   # LLM tracing, prompt versioning, cost tracking, evaluation.

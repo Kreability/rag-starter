@@ -1,13 +1,12 @@
 /**
- * Server-side dev authentication.
+ * DEV_MODE: server-side auto-login as a fixed dev user.
  *
- * The login UI is removed, but the Django API still requires a JWT and still
- * scopes every document to an owner — so the server transparently signs in as a
- * fixed dev user and caches the token.
+ * The Django API always requires a JWT and scopes every document to an owner.
+ * With DEV_MODE on, the server signs in as one shared account so `docker
+ * compose up` is usable with zero clicks. With it off — the default — every
+ * visitor logs in themselves and gets their own documents (see `lib/auth.ts`).
  *
  * This module is server-only: the credentials must never reach the browser.
- * To restore real per-user auth, delete this file and point `authHeaders()` in
- * `lib/rag.ts` back at the session.
  */
 
 import 'server-only'
@@ -15,6 +14,27 @@ import 'server-only'
 const API_URL = process.env.API_URL ?? 'http://api:8000'
 const USERNAME = process.env.DEV_USERNAME ?? 'ragtester'
 const PASSWORD = process.env.DEV_PASSWORD ?? ''
+
+/** Whether the shared dev account is standing in for real sessions. */
+export const DEV_MODE = process.env.DEV_MODE === 'true'
+
+/**
+ * A shared account in production would let any visitor read every other
+ * visitor's documents, so refuse to serve rather than fail open.
+ *
+ * Checked when a token is actually requested rather than at module load:
+ * `next build` runs with NODE_ENV=production, and a load-time throw would make
+ * a DEV_MODE image impossible to build even though nothing is being served yet.
+ */
+export function assertDevModeAllowed(): void {
+  if (DEV_MODE && process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'DEV_MODE=true is refused when NODE_ENV=production. DEV_MODE signs every ' +
+        'visitor in as the single DEV_USERNAME account, which would expose all ' +
+        'documents to everyone. Unset DEV_MODE to require real per-user login.'
+    )
+  }
+}
 
 type CachedToken = { access: string; refresh: string; expiresAt: number }
 
@@ -35,10 +55,12 @@ function decodeExpiry(accessToken: string): number {
 }
 
 async function login(): Promise<CachedToken> {
+  assertDevModeAllowed()
+
   if (!PASSWORD) {
     throw new Error(
-      'DEV_PASSWORD is not set in .env.frontend. Create the dev user with ' +
-        '`make superuser` and set DEV_USERNAME / DEV_PASSWORD to match.'
+      'DEV_MODE=true but DEV_PASSWORD is not set in .env.frontend. Create the ' +
+        'dev user with `make superuser` and set DEV_USERNAME / DEV_PASSWORD to match.'
     )
   }
 
@@ -83,7 +105,7 @@ async function refresh(token: CachedToken): Promise<CachedToken> {
   }
 }
 
-/** A valid access token, logging in or refreshing only when needed. */
+/** A valid dev access token, logging in or refreshing only when needed. */
 export async function getAccessToken(): Promise<string> {
   if (cached && Date.now() < cached.expiresAt) {
     return cached.access
@@ -109,4 +131,36 @@ export async function getAccessToken(): Promise<string> {
 /** Drop the cached token, forcing a fresh login on the next call. */
 export function clearToken(): void {
   cached = null
+}
+
+/**
+ * The access token for the current caller: the shared dev account under
+ * DEV_MODE, otherwise the signed-in user's own token.
+ *
+ * Every API caller goes through here so the two modes can never diverge.
+ * Throws when there is no session, which callers turn into a /login redirect.
+ */
+export async function getApiToken(): Promise<string> {
+  if (DEV_MODE) {
+    assertDevModeAllowed()
+    return getAccessToken()
+  }
+
+  // Imported lazily so DEV_MODE never pulls NextAuth into the server bundle.
+  const { getServerSession } = await import('next-auth')
+  const { authOptions } = await import('./auth')
+
+  const session = await getServerSession(authOptions)
+  if (!session?.accessToken || session.error) {
+    throw new UnauthenticatedError()
+  }
+  return session.accessToken
+}
+
+/** Signals "no usable session" so callers can redirect instead of erroring. */
+export class UnauthenticatedError extends Error {
+  constructor() {
+    super('Not signed in.')
+    this.name = 'UnauthenticatedError'
+  }
 }

@@ -11,7 +11,8 @@
   "dependencies": {
     "@frontend/types": "workspace:^",
     "@frontend/ui": "workspace:^",
-    "next": "^16.0.10"
+    "next": "^16.0.10",
+    "next-auth": "^4.24.13"
   },
   "devDependencies": {
     "typescript": "5.7.2"

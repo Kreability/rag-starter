@@ -14,7 +14,6 @@ from drf_spectacular.utils import extend_schema
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,11 @@ def _check(name: str, probe) -> tuple[str, bool]:
 )
 @api_view(["GET"])
 @permission_classes([AllowAny])
-@throttle_classes([AnonRateThrottle])
+# Explicitly unthrottled. Docker/Kubernetes probe this every 15s (~240/hour),
+# which the default anon limit (60/hour) would reject with 429 — marking a
+# perfectly healthy container unhealthy and blocking everything that waits on
+# it. The endpoint is cheap and leaks nothing, so it is safe to leave open.
+@throttle_classes([])
 def health(request):
     checks: dict[str, bool] = {}
 
@@ -54,8 +57,8 @@ def health(request):
         get_client().get_collections()
 
     def objectstore():
-        from rag.storage import get_s3_client
         from rag.conf import get_config
+        from rag.storage import get_s3_client
 
         get_s3_client().head_bucket(Bucket=get_config().s3.bucket)
 
