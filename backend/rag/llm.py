@@ -37,9 +37,27 @@ def get_chat_model() -> ChatOpenAI:
 
 
 @lru_cache(maxsize=1)
-def get_embedder() -> OpenAIEmbeddings:
-    """Dense embedder. `dimensions` must match the Qdrant collection."""
+def get_embedder():
+    """Dense embedder.
+
+    Set `EMBEDDER_PROVIDER=local` to embed in-process with FastEmbed (ONNX, CPU,
+    no API key). That matters because several chat providers — OpenRouter, Groq,
+    DeepSeek — serve no embedding models at all, and RAG needs both.
+
+    Otherwise any OpenAI-compatible embedding endpoint is used.
+    """
     settings = get_config().embedder
+
+    if settings.provider.lower() == "local":
+        from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+
+        logger.info("Using local FastEmbed embedder: %s", settings.local_model)
+        return FastEmbedEmbeddings(model_name=settings.local_model)
+
+    return _openai_embedder(settings)
+
+
+def _openai_embedder(settings) -> OpenAIEmbeddings:
     kwargs = {
         "model": settings.model,
         "api_key": settings.api_key.get_secret_value() or "not-needed",

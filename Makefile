@@ -1,6 +1,11 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
+# Production runs from its own compose file and env file. `--env-file` is not
+# optional: without it compose interpolates ${DOMAIN} and friends from .env
+# (dev host ports) instead of .env.prod.
+COMPOSE_PROD := docker compose --env-file .env.prod -f docker-compose.prod.yml
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -74,6 +79,37 @@ build-frontend: ## Type-check and build the frontend
 schema: ## Regenerate the frontend API client from the OpenAPI schema
 	$(COMPOSE) exec api uv run python manage.py spectacular --file /app/schema.yaml
 	cd frontend && pnpm openapi:generate
+
+# --------------------------------------------------------------- production ---
+
+.PHONY: prod-up
+prod-up: ## Build and start the production stack (needs .env.prod)
+	@test -f .env.prod || (echo "missing .env.prod — cp .env.prod.template .env.prod and fill it in" && exit 1)
+	$(COMPOSE_PROD) up -d --build
+	@echo "serving on https://$$(grep -E '^DOMAIN=' .env.prod | cut -d= -f2)"
+
+.PHONY: prod-down
+prod-down: ## Stop the production stack (keeps volumes)
+	$(COMPOSE_PROD) down
+
+.PHONY: prod-logs
+prod-logs: ## Tail production logs (S=service to filter)
+	$(COMPOSE_PROD) logs -f $(S)
+
+.PHONY: prod-superuser
+prod-superuser: ## Create the first admin user in production
+	$(COMPOSE_PROD) exec api uv run python manage.py createsuperuser
+
+.PHONY: backup
+backup: ## Back up production Postgres, Qdrant and MinIO
+	./scripts/backup.sh
+
+.PHONY: restore
+restore: ## Restore a backup (B=backups/<timestamp>)
+	@test -n "$(B)" || (echo "usage: make restore B=backups/<timestamp>" && exit 1)
+	./scripts/restore.sh $(B)
+
+# -------------------------------------------------------------------- extras ---
 
 .PHONY: observability
 observability: ## Start the stack with Langfuse tracing

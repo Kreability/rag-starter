@@ -6,7 +6,7 @@
  * cannot express. Everything else still goes through the generated client.
  */
 
-import { clearToken, getAccessToken } from './token'
+import { clearToken, DEV_MODE, getApiToken } from './token'
 
 export type DocumentStatus = 'UPLOADING' | 'PROCESSING' | 'READY' | 'ERROR'
 export type SourceType = 'FILE' | 'URL' | 'SITEMAP' | 'CONFLUENCE'
@@ -61,15 +61,16 @@ export type Paginated<T> = {
 const API_URL = process.env.API_URL ?? 'http://api:8000'
 
 async function authHeaders(): Promise<Record<string, string>> {
-  return { Authorization: `Bearer ${await getAccessToken()}` }
+  return { Authorization: `Bearer ${await getApiToken()}` }
 }
 
 /**
  * Call the API, retrying once on 401.
  *
- * The cached token can be invalidated out-of-band (server restart, password
- * change, blacklisted refresh), and a one-shot retry turns that from a visible
- * error into a transparent re-login.
+ * Only the DEV_MODE token is cached here and so only it can go stale
+ * out-of-band (server restart, password change, blacklisted refresh); a
+ * one-shot retry turns that from a visible error into a transparent re-login.
+ * Real sessions are refreshed by NextAuth, so a 401 there is genuine.
  */
 async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const send = async () =>
@@ -80,7 +81,7 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
     })
 
   const response = await send()
-  if (response.status !== 401) return response
+  if (response.status !== 401 || !DEV_MODE) return response
 
   clearToken()
   return send()

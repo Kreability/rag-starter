@@ -37,6 +37,12 @@ class EmbedderSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="EMBEDDER_", case_sensitive=False, extra="ignore")
 
+    # "openai" = any OpenAI-compatible endpoint; "local" = in-process FastEmbed
+    # (no API key, no extra service). Use "local" when the chat provider has no
+    # embedding models, e.g. OpenRouter, Groq, DeepSeek.
+    provider: str = Field(default="openai")
+    local_model: str = Field(default="BAAI/bge-small-en-v1.5")
+
     model: str = Field(default="text-embedding-3-small")
     api_key: SecretStr = Field(default=SecretStr(""))
     base_url: str | None = Field(default=None)

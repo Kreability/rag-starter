@@ -6,6 +6,10 @@ requirements.txt
 TODO.md
 .env.backend
 .env.frontend
+# holds every production credential
+.env.prod
+# local backup output (postgres dumps, qdrant snapshots, stored documents)
+/backups/
 data
 .pnp
 .pnp.js
@@ -32,3 +36,6 @@ celerybeat-schedule*
 
 # local host-port overrides
 /.env
+
+# local Claude Code tool permissions (may contain test commands/credentials)
+.claude/

@@ -37,7 +37,10 @@ RUN useradd --create-home --uid 10001 appuser && \
     chown -R appuser:appuser /app /.venv
 USER appuser
 
-RUN uv run python manage.py collectstatic --noinput || true
+# No `|| true`: if the admin/DRF/Swagger assets fail to collect, /static/ would
+# 404 at runtime and we would rather find out here than in production.
+# SECRET_KEY is only needed to let settings import; it is not baked in.
+RUN SECRET_KEY=build-only uv run python manage.py collectstatic --noinput
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -fsS http://localhost:8000/api/health/ || exit 1

@@ -139,6 +139,11 @@ USE_TZ = True
 ######################################################################
 STATIC_URL = "static/"
 
+# Required by `collectstatic`, which the production image runs at build time so
+# the admin/DRF/Swagger assets are baked in. Unused under `runserver`, which
+# serves each app's static/ directory directly.
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
 ######################################################################
 # Rest Framework
 ######################################################################
