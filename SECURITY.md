@@ -9,8 +9,7 @@ Report it privately through GitHub's
 go to the **Security** tab of this repository and choose **Report a
 vulnerability**. That opens a private advisory visible only to the maintainers.
 
-<!-- TODO(maintainer): add a contact email here as a fallback for reporters who
-     cannot use GitHub advisories, e.g. security@yourdomain.example -->
+If you cannot use GitHub advisories, email **anas@kreability.com** instead.
 
 Please include:
 
