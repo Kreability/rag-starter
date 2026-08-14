@@ -109,6 +109,8 @@ services:
       target: development
     restart: unless-stopped
     mem_limit: 1g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: >
       bash -c "uv sync &&
                uv run -- python manage.py migrate &&
@@ -158,6 +160,8 @@ services:
       target: development
     restart: unless-stopped
     mem_limit: 2g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: >
       bash -c "uv sync &&
                uv run -- celery -A api worker --loglevel=INFO --concurrency=2"

@@ -94,7 +94,16 @@ class RerankerSettings(BaseSettings):
     enabled: bool = Field(default=True)
     model: str = Field(default="ms-marco-MiniLM-L-12-v2")
     k_documents: int = Field(default=5)
-    min_relevance_score: float = Field(default=0.001)
+    # Absolute relevance bar for the best match. FlashRank's sigmoid outputs
+    # are tiny even for solid matches when only a few candidates survive the
+    # dense search (a 2-chunk hit scores ~3e-5), so this only catches matches
+    # that are effectively noise (~0). The relative ratio below does the real
+    # pruning.
+    min_relevance_score: float = Field(default=1e-6)
+    # Relative cutoff applied to the rest: keep candidates scoring at least
+    # `min_relevance_ratio * top_score`. Calibrated for FlashRank's sigmoid
+    # outputs, which are small for weak-but-real matches on short chunks.
+    min_relevance_ratio: float = Field(default=0.05)
 
 
 class ChunkerSettings(BaseSettings):
@@ -121,6 +130,39 @@ class ChatHistorySettings(BaseSettings):
     reverse: bool = Field(default=True)
 
 
+class SmallTalkSettings(BaseSettings):
+    """Gate for greetings/small talk so they skip retrieval and answer directly.
+
+    Enabled by default: a pure greeting ("hey", "hi", "thanks") should never
+    consume a vector search or produce a hallucinated "about the context" reply.
+    Every knob is an env var so integrators can tune it without touching code.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SMALL_TALK_", case_sensitive=False, extra="ignore")
+
+    enabled: bool = Field(default=True)
+    # "template" returns a static, offline reply (zero LLM calls, instant).
+    # "llm" generates a short, friendly, language-aware reply via the chat model.
+    reply_mode: str = Field(default="template")
+    # Static reply used when reply_mode=template. Client-facing: keep it warm
+    # and jargon-free, this is the literal text your users read.
+    response: str = Field(default="Hi there! How can I help you today?")
+    # Comma-separated regex patterns, matched case-insensitively against the
+    # trimmed question. A full match routes the message to the small-talk node.
+    patterns: str = Field(
+        default=(
+            r"^(hi|hello|hey|hiya|howdy|yo|sup|good ?(morning|afternoon|evening)|"
+            r"hello there|hi there|hii+|heyy+|heyya)[!.?']*$,"
+            r"^what('s| is) up[!?]?$,"
+            r"^how('s| is) it going[!?]?$,"
+            r"^how are you([!?]| doing)[!?]?$,"
+            r"^(thank you|thanks|thx|ty|thnx)[!. ]*$,"
+            r"^(bye|goodbye|good bye|see you|cya|later|peace)[!. ]*$,"
+            r"^(who are you|what can you do|what do you do|what can you help me with)[!?]?$"
+        )
+    )
+
+
 class LangfuseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LANGFUSE_", case_sensitive=False, extra="ignore")
 
@@ -139,6 +181,10 @@ class S3Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="S3_", case_sensitive=False, extra="ignore")
 
     endpoint: str = Field(default="http://minio:9000")
+    # Browser-facing host for pre-signed download links. In Docker Compose the
+    # backend talks to `minio` on the internal network, but the browser must
+    # reach the same bucket via the host-published port (localhost:9000).
+    public_endpoint: str = Field(default="http://minio:9000")
     access_key_id: SecretStr = Field(default=SecretStr(""))
     secret_access_key: SecretStr = Field(default=SecretStr(""))
     bucket: str = Field(default="rag-documents")
@@ -167,6 +213,12 @@ class ErrorMessages(BaseSettings):
     no_documents_message: str = Field(
         default="I couldn't find anything in the knowledge base that answers this."
     )
+    # Shown when retrieval found chunk(s) but the model failed while answering
+    # (unreachable provider, timeout, crash). Distinct from the no-match message
+    # so a real outage is never masked as "no documents found".
+    generation_failed_message: str = Field(
+        default="I found relevant information but couldn't generate an answer right now. Please try again."
+    )
     no_or_empty_collection: str = Field(
         default="The knowledge base is empty. Upload a document first."
     )
@@ -187,6 +239,7 @@ class RagConfig:
         self.chunker = ChunkerSettings()
         self.summarizer = SummarizerSettings()
         self.chat_history = ChatHistorySettings()
+        self.small_talk = SmallTalkSettings()
         self.langfuse = LangfuseSettings()
         self.s3 = S3Settings()
         self.ingestion = IngestionSettings()

@@ -29,7 +29,8 @@ export function DocumentManager({ documents }: { documents: RagDocument[] }) {
 
   useEffect(() => {
     if (!hasPendingWork) return
-    const timer = setInterval(() => router.refresh(), 3000)
+    // Poll slow enough to stay far under the API's per-hour list throttle.
+    const timer = setInterval(() => router.refresh(), 10000)
     return () => clearInterval(timer)
   }, [hasPendingWork, router])
 

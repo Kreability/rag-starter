@@ -1,15 +1,18 @@
 """The chat graph.
 
 Ported from `rag_core_api/impl/graph/chat_graph.py`, preserving the node
-topology exactly:
+topology exactly, with a small-talk gate added before the main pipeline:
 
-    START -> determine_language -> rephrase -> retrieve
-                                                 |
-                                    +------------+------------+
-                                    v                         v
-                                 generate                 error_node
-                                    |                         |
-                                    +-----------> END <-------+
+    START -> (small talk?) -> conversational --------------> END
+                       |
+                       v
+         determine_language -> rephrase -> retrieve
+                                            |
+                               +------------+------------+
+                               v                         v
+                            generate                 error_node
+                               |                         |
+                               +-----------> END <-------+
 
 Added on top of upstream: `astream_answer`, which streams answer tokens after
 running the same retrieval pipeline, so the Next.js UI can render progressively.
@@ -20,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import operator
+import re
 from enum import StrEnum
 from typing import Annotated, Any, TypedDict
 
@@ -28,10 +32,12 @@ from langgraph.graph import END, START, StateGraph
 
 from rag.conf import get_config
 from rag.llm import get_chat_model
+from rag.storage import presigned_url
 from rag.prompts import (
     ANSWER_GENERATION_PROMPT,
     LANGUAGE_DETECTION_PROMPT,
     QUESTION_REPHRASING_PROMPT,
+    SMALL_TALK_PROMPT,
 )
 from rag.retrieval import NoOrEmptyCollectionError, retrieve
 
@@ -44,6 +50,7 @@ class GraphNodeNames(StrEnum):
     RETRIEVE = "retrieve"
     GENERATE = "generate"
     ERROR_NODE = "error_node"
+    CONVERSATIONAL = "conversational"
 
 
 class AnswerGraphState(TypedDict, total=False):
@@ -83,10 +90,27 @@ def document_to_citation(document: Document) -> dict:
         "type": metadata.get("type", "TEXT"),
         "document_id": metadata.get("document_id", ""),
         "document_name": metadata.get("document_name", ""),
-        "document_url": metadata.get("document_url", ""),
+        # Presign fresh: the signed URL is valid for ~15 minutes, so a baked one
+        # is stale (host + expiry) by the time the user clicks a citation.
+        "document_url": _citation_url(metadata),
         "page": metadata.get("page", ""),
         "score": metadata.get("relevance_score", metadata.get("score")),
     }
+
+
+def _citation_url(metadata: dict) -> str:
+    """A clickable link for a citation.
+
+    Order: a fresh pre-signed URL for object-stored files, then the stable
+    source URI for web sources, then whatever was stored on older chunks.
+    """
+    storage_key = metadata.get("storage_key") or metadata.get("document_url") or ""
+    if storage_key and not storage_key.startswith("http"):
+        url = presigned_url(storage_key)
+        if url:
+            return url
+        return ""
+    return metadata.get("document_url", "")
 
 
 def build_context(documents: list[Document]) -> str:
@@ -102,6 +126,36 @@ def build_context(documents: list[Document]) -> str:
         location = f"{name}, page {page}" if page else name
         blocks.append(f"[{index}] ({location})\n{document.page_content}")
     return "\n\n---\n\n".join(blocks)
+
+
+# --- small-talk gate -------------------------------------------------------
+
+
+def is_small_talk(question: str) -> bool:
+    """Decide whether a message is pure greeting/small talk, skipping retrieval.
+
+    Matches the full, trimmed question against the configured regex patterns.
+    An anchored match means there is no real knowledge request, so answering
+    conversationally (no citations) is the right behaviour.
+    """
+    settings = get_config().small_talk
+    if not settings.enabled:
+        return False
+    text = question.strip().lower().rstrip("!?.,; ")
+    if not text:
+        return False
+    return any(
+        pattern.strip() and re.fullmatch(pattern.strip(), text)
+        for pattern in settings.patterns.split(",")
+    )
+
+
+def _route_from_start(state: AnswerGraphState) -> str:
+    return (
+        GraphNodeNames.CONVERSATIONAL
+        if is_small_talk(state["question"])
+        else GraphNodeNames.DETERMINE_LANGUAGE
+    )
 
 
 # --- nodes ----------------------------------------------------------------
@@ -177,16 +231,27 @@ async def _retrieve_node(state: AnswerGraphState) -> dict:
 
 
 async def _generate_node(state: AnswerGraphState, config=None) -> dict:
-    chain = ANSWER_GENERATION_PROMPT | get_chat_model()
-    response = await chain.ainvoke(
-        {
-            "question": state["question"],
-            "history": state.get("history", ""),
-            "context": build_context(state["documents"]),
-            "language": state.get("language", "en"),
-        },
-        config=config,
-    )
+    errors = get_config().errors
+    try:
+        chain = ANSWER_GENERATION_PROMPT | get_chat_model()
+        response = await chain.ainvoke(
+            {
+                "question": state["question"],
+                "history": state.get("history", ""),
+                "context": build_context(state["documents"]),
+                "language": state.get("language", "en"),
+            },
+            config=config,
+        )
+    except Exception:
+        logger.exception("Answer generation failed.")
+        # Retrieval succeeded but the model could not respond. Say so honestly
+        # instead of lying that no documents were found.
+        return {
+            "answer_text": errors.generation_failed_message,
+            "citations": [document_to_citation(d) for d in state["documents"]],
+            "finish_reason": "GenerationError",
+        }
     answer = getattr(response, "content", response)
     answer = answer if isinstance(answer, str) else str(answer)
     return {
@@ -204,19 +269,50 @@ async def _error_node(state: AnswerGraphState) -> dict:
     }
 
 
+async def _conversational_node(state: AnswerGraphState, config=None) -> dict:
+    """Answer greetings/small talk without touching retrieval or the KB.
+
+    `reply_mode=template` returns the configured static text (zero LLM calls,
+    instant, fully offline). `reply_mode=llm` asks the chat model for a short,
+    language-aware reply.
+    """
+    settings = get_config().small_talk
+    if settings.reply_mode == "llm":
+        try:
+            chain = SMALL_TALK_PROMPT | get_chat_model()
+            response = await chain.ainvoke(
+                {"question": state["question"], "language": state.get("language", "en")},
+                config=config,
+            )
+            answer = getattr(response, "content", response)
+            answer = answer if isinstance(answer, str) else str(answer)
+        except Exception:
+            logger.warning("Small-talk LLM reply failed; using template.", exc_info=True)
+            answer = settings.response
+    else:
+        answer = settings.response
+    return {"answer_text": answer, "citations": [], "finish_reason": "stop"}
+
+
 def _docs_retrieved_edge(state: AnswerGraphState) -> str:
     return GraphNodeNames.GENERATE if state.get("documents") else GraphNodeNames.ERROR_NODE
 
 
 def build_graph():
     graph = StateGraph(AnswerGraphState)
+    graph.add_node(GraphNodeNames.CONVERSATIONAL, _conversational_node)
     graph.add_node(GraphNodeNames.DETERMINE_LANGUAGE, _determine_language_node)
     graph.add_node(GraphNodeNames.REPHRASE, _rephrase_node)
     graph.add_node(GraphNodeNames.RETRIEVE, _retrieve_node)
     graph.add_node(GraphNodeNames.GENERATE, _generate_node)
     graph.add_node(GraphNodeNames.ERROR_NODE, _error_node)
 
-    graph.add_edge(START, GraphNodeNames.DETERMINE_LANGUAGE)
+    graph.add_conditional_edges(
+        START,
+        _route_from_start,
+        [GraphNodeNames.CONVERSATIONAL, GraphNodeNames.DETERMINE_LANGUAGE],
+    )
+    graph.add_edge(GraphNodeNames.CONVERSATIONAL, END)
     graph.add_edge(GraphNodeNames.DETERMINE_LANGUAGE, GraphNodeNames.REPHRASE)
     graph.add_edge(GraphNodeNames.REPHRASE, GraphNodeNames.RETRIEVE)
     graph.add_conditional_edges(
@@ -290,6 +386,13 @@ async def astream_answer(
         yield {"type": "error", "message": errors.empty_message}
         return
 
+    if is_small_talk(question):
+        reply = await _conversational_node({"question": question})
+        yield {"type": "citations", "citations": []}
+        yield {"type": "token", "token": reply["answer_text"]}
+        yield {"type": "done", "finish_reason": "stop"}
+        return
+
     formatted_history = format_history(history or [])
 
     try:
@@ -336,7 +439,7 @@ async def astream_answer(
                 yield {"type": "token", "token": token}
     except Exception:
         logger.exception("Answer streaming failed.")
-        yield {"type": "error", "message": errors.no_documents_message}
+        yield {"type": "error", "message": errors.generation_failed_message}
         return
 
     yield {"type": "done", "finish_reason": "stop"}

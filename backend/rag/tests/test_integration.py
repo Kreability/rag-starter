@@ -44,10 +44,12 @@ class FakeEmbeddings(Embeddings):
     """Deterministic embeddings: same text always maps to the same vector.
 
     Must subclass `Embeddings` — langchain-qdrant type-checks this at
-    collection-creation time.
+    collection-creation time. Dimension matches the configured embedder (the
+    real one is bge-small at 384): the collection is sized from config, so a
+    fake with a different width fails Qdrant's size validation.
     """
 
-    dimensions = 1536
+    dimensions = 384
 
     def _vector(self, text: str) -> list[float]:
         digest = hashlib.sha256(text.encode()).digest()
@@ -78,6 +80,7 @@ def isolated_collection(monkeypatch):
     monkeypatch.setenv("VECTOR_DB_RETRIEVAL_MODE", "DENSE")
     monkeypatch.setenv("RERANKER_ENABLED", "False")
     monkeypatch.setenv("SPARSE_EMBEDDER_ENABLED", "False")
+    monkeypatch.setenv("EMBEDDER_DIMENSIONS", "384")
 
     from rag import conf, llm, vectordb
 

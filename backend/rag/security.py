@@ -21,9 +21,9 @@ from rag.conf import get_config
 # Extension -> MIME allowlist. Anything not listed is rejected outright.
 ALLOWED_EXTENSIONS: dict[str, tuple[str, ...]] = {
     ".pdf": ("application/pdf",),
-    ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",),
-    ".pptx": ("application/vnd.openxmlformats-officedocument.presentationml.presentation",),
-    ".xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",),
+    ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/zip"),
+    ".pptx": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/zip"),
+    ".xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/zip"),
     ".csv": ("text/csv", "text/plain", "application/csv"),
     ".txt": ("text/plain",),
     ".md": ("text/markdown", "text/plain"),
@@ -31,7 +31,7 @@ ALLOWED_EXTENSIONS: dict[str, tuple[str, ...]] = {
     ".htm": ("text/html",),
     ".xml": ("application/xml", "text/xml"),
     ".json": ("application/json", "text/plain"),
-    ".epub": ("application/epub+zip",),
+    ".epub": ("application/epub+zip", "application/zip"),
     ".png": ("image/png",),
     ".jpg": ("image/jpeg",),
     ".jpeg": ("image/jpeg",),

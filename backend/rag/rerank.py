@@ -49,8 +49,6 @@ def _rerank_sync(documents: list[Document], query: str) -> list[Document]:
     results: list[Document] = []
     for entry in ranked:
         score = float(entry.get("score", 0.0))
-        if score < settings.min_relevance_score:
-            continue
         original = documents[int(entry["id"])]
         # Restore the metadata FlashRank drops, then attach the new score.
         original.metadata = {**original.metadata, "relevance_score": score}
@@ -58,5 +56,24 @@ def _rerank_sync(documents: list[Document], query: str) -> list[Document]:
         if len(results) >= settings.k_documents:
             break
 
-    logger.debug("Reranked %d candidates down to %d.", len(documents), len(results))
-    return results
+    if not results:
+        return []
+
+    # Anchor rule: the best match is the query's anchor. When even the top hit
+    # sits below the relevance bar the query only matched noise (e.g. a
+    # butter-chicken recipe enjoying a user's marketing notes), so surface
+    # none of it rather than hallucinate over irrelevant chunks.
+    top_score = results[0].metadata.get("relevance_score", 0.0)
+    if top_score < settings.min_relevance_score:
+        logger.debug("Top reranked score below threshold; discarding %d matches.", len(results))
+        return []
+
+    # Weak-but-real matches (e.g. a Client Acquisition section queried as "how
+    # we can sell") can score far below the anchor in FlashRank's sigmoid range.
+    # Keep anything within a fixed ratio of the anchor: real matches survive
+    # while the long noisy tail is cut.
+    kept: list[Document] = []
+    for document in results:
+        if document.metadata.get("relevance_score", 0.0) >= top_score * settings.min_relevance_ratio:
+            kept.append(document)
+    return kept

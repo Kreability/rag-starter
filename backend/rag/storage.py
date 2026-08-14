@@ -32,6 +32,27 @@ def get_s3_client():
     )
 
 
+@lru_cache(maxsize=1)
+def get_public_s3_client():
+    """S3 client bound to the browser-reachable endpoint for presigning.
+
+    Pre-signed URLs must be signed against the exact host the browser will hit,
+    because AWS4 signs the `Host` header. Signing against `minio:9000` and then
+    rewriting the host in the URL breaks the signature.
+    """
+    settings = get_config().s3
+    if not settings.public_endpoint or settings.public_endpoint == settings.endpoint:
+        return get_s3_client()
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.public_endpoint,
+        aws_access_key_id=settings.access_key_id.get_secret_value() or None,
+        aws_secret_access_key=settings.secret_access_key.get_secret_value() or None,
+        region_name=settings.region,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+
+
 def ensure_bucket() -> None:
     """Create the bucket if missing. Idempotent."""
     settings = get_config().s3
@@ -77,7 +98,7 @@ def presigned_url(key: str) -> str:
         return ""
     settings = get_config().s3
     try:
-        return get_s3_client().generate_presigned_url(
+        return get_public_s3_client().generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.bucket, "Key": key},
             ExpiresIn=settings.presign_ttl_seconds,

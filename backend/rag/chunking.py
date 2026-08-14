@@ -30,7 +30,13 @@ def get_splitter() -> RecursiveCharacterTextSplitter:
 
 
 def pieces_to_documents(
-    pieces: list[Piece], *, document_id: str, owner_id: int, document_name: str, document_url: str
+    pieces: list[Piece],
+    *,
+    document_id: str,
+    owner_id: int,
+    document_name: str,
+    storage_key: str = "",
+    document_url: str = "",
 ) -> list[Document]:
     """Chunk extracted pieces into LangChain documents carrying full metadata.
 
@@ -44,11 +50,14 @@ def pieces_to_documents(
             "document_id": document_id,
             "owner_id": owner_id,
             "document_name": document_name,
-            "document_url": piece.metadata.get("document_url", document_url),
+            # The storage key, not a pre-signed URL: signed links carry a 15-minute
+            # TTL and a host that depends on where they were generated. Citations
+            # presign the key at answer time instead.
+            "storage_key": storage_key,
+            "document_url": document_url,
             "type": piece.content_type,
             "page": piece.page or "",
             "related": [],
-            **{k: v for k, v in piece.metadata.items() if k != "document_url"},
         }
 
         if piece.content_type == "TABLE":

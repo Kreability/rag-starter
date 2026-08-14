@@ -19,7 +19,7 @@ from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -55,7 +55,8 @@ class DocumentViewSet(
 
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    # File upload uses multipart; the source/scraper endpoint sends JSON.
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "documents"
 
@@ -148,6 +149,15 @@ class DocumentViewSet(
         document.save(update_fields=["status", "error_message", "modified_at"])
         self._queue(document)
         return Response(DocumentSerializer(document).data, status=status.HTTP_202_ACCEPTED)
+
+    @extend_schema(
+        responses={200: {"type": "object", "properties": {"download_url": {"type": "string"}}}},
+        description="Fresh signed download URL. Citations and stored download_url values expire (~15 min); call this at click time.",
+    )
+    @action(detail=True, methods=["get"], url_path="resolve-download")
+    def resolve_download(self, request, pk=None):
+        document = self.get_object()
+        return Response({"download_url": DocumentSerializer(document).data["download_url"]})
 
     @extend_schema(responses={200: ChunkSerializer(many=True)}, description="List a document's chunks.")
     @action(detail=True, methods=["get"])

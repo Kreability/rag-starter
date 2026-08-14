@@ -151,11 +151,11 @@ make superuser        # or: docker compose exec api uv run python manage.py crea
 
 Upload a document on **Documents**, wait for `READY`, then ask about it on **Chat**.
 
-### Authentication is currently disabled in the UI
+### Authentication
 
-There are no login or register pages. The Django API still requires a JWT and still scopes every document to an owner, so the Next.js **server** signs in as a fixed account and caches the token (`apps/web/lib/token.ts`). Set `DEV_USERNAME` and `DEV_PASSWORD` in `.env.frontend` to match the user you created above.
+Per-user auth is enabled by default. Visitors **register** an account, then **sign in**; every document, chunk, and vector query is scoped to the owning account (tenant isolation is enforced in the vector query itself, never after the fact). The Django API authenticates with JWT, and the frontend keeps that token server-side.
 
-The credentials stay server-side and never reach the browser — but **anyone who can open the app acts as that user, so do not expose this build publicly.** To restore per-user access, reinstate a session check in `app/(rag)/layout.tsx` and point `authHeaders()` in `lib/rag.ts` back at it. The backend needs no changes; its auth and tenant isolation were never removed.
+To try the template locally without the login screen, set `DEV_MODE=true` in `.env.frontend` — the server then signs in as the single `DEV_USERNAME` account on every visitor's behalf, so **everyone shares one knowledge base**. The app refuses to start if `DEV_MODE=true` with `NODE_ENV=production`, and `DEV_USERNAME` must match a real Django user (`make superuser`).
 
 ### Stopping the stack
 
@@ -290,7 +290,7 @@ The upstream template ran single-tenant behind basic auth inside a trusted clust
 - **XSS-safe rendering** — model output renders through a Markdown component that emits React elements, never `dangerouslySetInnerHTML`. `javascript:` URLs in links are rendered as plain text.
 - **Non-root container** in the production Docker stage.
 
-> **Before deploying publicly:** set `DEBUG=0`, use a strong `SECRET_KEY`, restrict `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS`, set `VECTOR_DB_API_KEY` (and uncomment the matching line in `docker-compose.yaml`), replace the default MinIO credentials, and restore per-user authentication.
+> **Before deploying publicly:** set `DEBUG=0`, use a strong `SECRET_KEY`, restrict `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS`, set `VECTOR_DB_API_KEY` (and uncomment the matching line in `docker-compose.yaml`), replace the default MinIO credentials, set a strong `NEXTAUTH_SECRET`, and leave `DEV_MODE` unset or empty.
 
 ---
 
@@ -308,7 +308,7 @@ DATABASE_HOST=localhost DATABASE_PORT=5433 VECTOR_DB_URL=http://localhost:6333 \
   uv run pytest rag/tests/test_integration.py -v
 ```
 
-**52 tests**, covering upload validation and filename sanitisation, the SSRF guard (including DNS-rebinding-style bypasses), summary expansion and deduplication, retrieval pruning, cross-tenant isolation against a live vector database, idempotent re-ingestion, and extraction of CSV, plain text, and long tables.
+**68 tests**, covering upload validation and filename sanitisation, the SSRF guard (including DNS-rebinding-style bypasses), summary expansion and deduplication, retrieval pruning, cross-tenant isolation against a live vector database, idempotent re-ingestion, extraction of CSV, plain text, and long tables, the small-talk answering gate, and the no-fabrication refusal path.
 
 ---
 
@@ -377,13 +377,13 @@ Qdrant, for hybrid dense + sparse search, payload filtering, and HNSW indexing. 
 Qdrant handles millions of vectors on a single node. The practical limits here are ingestion throughput (bounded by your embedding provider's rate limits) and the Celery worker count.
 
 **Does it support multiple users?**
-The backend does — every document has an owner and every vector query filters on it. The frontend login UI is currently removed; see [Authentication is currently disabled in the UI](#authentication-is-currently-disabled-in-the-ui).
+Yes — users register and sign in, and every document has an owner; every vector query filters on it, so each account only sees its own content. See [Authentication](#authentication).
 
 **How do I add a new file format?**
 Add the extension to `ALLOWED_EXTENSIONS` in `backend/rag/security.py` and, if it needs special handling, a branch in `backend/rag/extract.py`.
 
 **Is this production ready?**
-The retrieval pipeline, security controls, and infrastructure are. Before going live you still need to restore per-user authentication, harden the deployment settings listed under [Security](#security), and run the production Docker stage (gunicorn, non-root) rather than the development one.
+The retrieval pipeline, security controls, and infrastructure are. Per-user authentication is enabled by default. Before going live you still need to harden the deployment settings listed under [Security](#security) and run the production Docker stage (gunicorn, non-root) rather than the development one.
 
 ---
 

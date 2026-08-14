@@ -167,7 +167,7 @@ REST_FRAMEWORK = {
         "user": environ.get("THROTTLE_USER", "1000/hour"),
         "anon": environ.get("THROTTLE_ANON", "60/hour"),
         "chat": environ.get("THROTTLE_CHAT", "120/hour"),
-        "documents": environ.get("THROTTLE_DOCUMENTS", "200/hour"),
+        "documents": environ.get("THROTTLE_DOCUMENTS", "1000/hour"),
     },
 }
 

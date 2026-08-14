@@ -16,6 +16,7 @@ so tenant isolation is enforced in the query itself rather than after the fact.
 """
 
 from __future__ import annotations
+from rag.conf import RetrieverSettings
 
 import asyncio
 import logging
@@ -34,7 +35,7 @@ class NoOrEmptyCollectionError(RuntimeError):
 
 def _quarks() -> list[dict]:
     """Per-content-type search budgets. Upstream calls these 'retriever quarks'."""
-    settings = get_config().retriever
+    settings: RetrieverSettings = get_config().retriever
     return [
         {"type": "TEXT", "k": settings.k_documents, "threshold": settings.threshold},
         {"type": "TABLE", "k": settings.table_k_documents, "threshold": settings.table_threshold},
@@ -129,7 +130,7 @@ def _early_prune(documents: list[Document]) -> list[Document]:
 
 async def _rerank(documents: list[Document], query: str) -> list[Document]:
     settings = get_config().reranker
-    if not settings.enabled or len(documents) <= settings.k_documents:
+    if not settings.enabled:
         return documents
     try:
         from rag.rerank import rerank
@@ -138,4 +139,9 @@ async def _rerank(documents: list[Document], query: str) -> list[Document]:
     except Exception:
         # Fail soft, exactly as upstream does: unreranked beats no answer.
         logger.warning("Reranker failed; returning unreranked results.", exc_info=True)
-        return documents[: settings.k_documents]
+        results = sorted(
+            (d for d in documents if "score" in d.metadata),
+            key=lambda d: d.metadata["score"],
+            reverse=True,
+        )
+        return results[: settings.k_documents] or documents

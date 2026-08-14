@@ -59,13 +59,16 @@ def ingest_document(document_id: str) -> int:
         if not pieces:
             raise IngestionError("No readable content could be extracted from this source.")
 
-        document_url = storage.presigned_url(document.storage_key) if document.storage_key else document.source_uri
         documents = pieces_to_documents(
             pieces,
             document_id=str(document.id),
             owner_id=document.owner_id,
             document_name=document.name,
-            document_url=document_url,
+            # Pass the stable key (or source URI for web sources), never a
+            # pre-signed URL: those expire in minutes and are host-dependent.
+            # Citations presign at answer time.
+            storage_key=document.storage_key,
+            document_url=document.source_uri,
         )
         if not documents:
             raise IngestionError("Extraction produced no indexable chunks.")

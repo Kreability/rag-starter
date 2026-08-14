@@ -7,9 +7,24 @@ import type { Citation } from '@/lib/rag'
  * Sources behind an answer. Collapsed by default so long answers stay readable,
  * with the exact retrieved passage available on expand — that is what makes an
  * answer auditable rather than merely plausible.
+ *
+ * "Open" resolves a fresh signed URL at click time via the Next.js proxy route
+ * (`/api/documents/[id]/resolve-download`), which attaches the caller's token
+ * server-side and returns an unexpired link. The URL baked into a stored chat
+ * expires in ~15 minutes, so the stored copy would 403.
  */
 export function CitationList({ citations }: { citations: Citation[] }) {
   const [expanded, setExpanded] = useState(false)
+
+  async function openCitation(citation: Citation) {
+    const response = await fetch(`/api/documents/${citation.document_id}/resolve-download`)
+    if (!response.ok) {
+      const { error } = (await response.json().catch(() => ({}))) as { error?: string }
+      throw new Error(error ?? 'Could not open this source.')
+    }
+    const { download_url } = (await response.json()) as { download_url: string }
+    window.open(download_url, '_blank', 'noopener,noreferrer')
+  }
 
   return (
     <div className="rounded-lg border border-gray-200 bg-gray-50/70">
@@ -46,15 +61,14 @@ export function CitationList({ citations }: { citations: Citation[] }) {
                       ` · ${citation.score.toFixed(3)}`}
                   </p>
                 </div>
-                {citation.document_url && (
-                  <a
-                    href={citation.document_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                {citation.document_id && (
+                  <button
+                    type="button"
+                    onClick={() => openCitation(citation)}
                     className="shrink-0 text-[11px] text-purple-600 underline"
                   >
                     Open
-                  </a>
+                  </button>
                 )}
               </div>
               <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-[11px] leading-relaxed text-gray-600">
