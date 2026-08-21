@@ -117,13 +117,17 @@ def build_context(documents: list[Document]) -> str:
     """Render retrieved chunks as numbered, delimited context.
 
     Numbering lets the model reference sources; the delimiters make it visible
-    where untrusted document text starts and stops.
+    where untrusted document text starts and stops. When a `section_path` is
+    present it is appended so the model sees the structural context.
     """
     blocks = []
     for index, document in enumerate(documents, start=1):
         name = document.metadata.get("document_name", "unknown")
         page = document.metadata.get("page", "")
         location = f"{name}, page {page}" if page else name
+        section = document.metadata.get("section_path", "")
+        if section:
+            location = f"{location}, {section}"
         blocks.append(f"[{index}] ({location})\n{document.page_content}")
     return "\n\n---\n\n".join(blocks)
 

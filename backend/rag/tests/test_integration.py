@@ -14,6 +14,7 @@ Run with the compose stack up:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import uuid
@@ -268,3 +269,163 @@ class TestExtraction:
             document_url="",
         )
         assert len(documents) == 1, "a table must stay intact even when long"
+
+    def test_markdown_headers_split_into_sections(self):
+        from rag.chunking import pieces_to_documents
+        from rag.extract import Piece
+
+        content = "\n".join([
+            "# Anas Ahmad",
+            "Software Engineer.",
+            "",
+            "## Technical Skills",
+            "Python, JavaScript.",
+            "",
+            "## Experience",
+            "Worked at Company A.",
+            "",
+            "### Credminds",
+            "Built things.",
+            "",
+            "## Projects",
+            "AI coding agent.",
+        ])
+        documents = pieces_to_documents(
+            [Piece(content=content, content_type="TEXT", page="1")],
+            document_id="doc-1",
+            owner_id=1,
+            document_name="resume.md",
+        )
+
+        paths = [d.metadata.get("section_path", "") for d in documents]
+        assert "Anas Ahmad" in paths
+        assert "Anas Ahmad > Technical Skills" in paths
+        assert "Anas Ahmad > Experience" in paths
+        assert "Anas Ahmad > Experience > Credminds" in paths
+        assert "Anas Ahmad > Projects" in paths
+
+    def test_long_markdown_section_is_recursively_split(self):
+        from rag.chunking import pieces_to_documents
+        from rag.extract import Piece
+
+        long_line = "word " * 200
+        content = "\n".join([
+            "# Projects",
+            long_line,
+            long_line,
+        ])
+        documents = pieces_to_documents(
+            [Piece(content=content, content_type="TEXT", page="1")],
+            document_id="doc-1",
+            owner_id=1,
+            document_name="resume.md",
+        )
+
+        assert len(documents) > 1, "oversized markdown section should be split"
+        for doc in documents:
+            assert doc.metadata.get("section_path") == "Projects"
+
+    def test_plain_text_falls_back_to_recursive_splitter(self):
+        from rag.chunking import pieces_to_documents
+        from rag.extract import Piece
+
+        content = "alpha beta gamma " * 200
+        documents = pieces_to_documents(
+            [Piece(content=content, content_type="TEXT", page="1")],
+            document_id="doc-1",
+            owner_id=1,
+            document_name="notes.txt",
+        )
+
+        assert len(documents) > 1, "plain text should still split"
+        assert all(d.metadata.get("section_path", "") == "" for d in documents)
+
+    def test_section_path_is_preserved_across_positions(self):
+        from rag.chunking import pieces_to_documents
+        from rag.extract import Piece
+
+        long_line = "word " * 200
+        content = "\n".join([
+            "# Experience",
+            long_line,
+            long_line,
+        ])
+        documents = pieces_to_documents(
+            [Piece(content=content, content_type="TEXT", page="1")],
+            document_id="doc-1",
+            owner_id=1,
+            document_name="resume.md",
+        )
+
+        assert len(documents) > 1
+        for doc in documents:
+            assert doc.metadata["section_path"] == "Experience"
+
+    def test_image_captioning_disabled_preserves_original_piece(self):
+        from rag.extract import Piece
+        from rag.image_captioner import caption_images
+
+        pieces = [
+            Piece(
+                content="ZmFrZSBpbWFnZSBkYXRh",
+                content_type="IMAGE",
+                page="1",
+                metadata={"mime_type": "image/png"},
+            )
+        ]
+        with patch("rag.conf.get_config") as mock_config:
+            mock_config.return_value.image_captioner.enabled = False
+            result = asyncio.run(caption_images(pieces, document_id="doc-1"))
+
+        assert result[0].content == "ZmFrZSBpbWFnZSBkYXRh"
+        assert result[0].content_type == "IMAGE"
+
+    def test_image_captioning_replaces_content_with_caption(self):
+        from rag.extract import Piece
+        from rag.image_captioner import caption_images
+
+        pieces = [
+            Piece(
+                content="ZmFrZSBpbWFnZSBkYXRh",
+                content_type="IMAGE",
+                page="1",
+                metadata={"mime_type": "image/png"},
+            )
+        ]
+        with patch("rag.conf.get_config") as mock_config, patch(
+            "rag.image_captioner.caption_image", return_value="A red bar chart showing Q3 revenue."
+        ) as mock_caption, patch(
+            "rag.image_captioner._upload_image", return_value="images/doc-1/page-1.png"
+        ) as mock_upload:
+            mock_config.return_value.image_captioner.enabled = True
+            mock_config.return_value.image_captioner.max_concurrency = 2
+            result = asyncio.run(caption_images(pieces, document_id="doc-1"))
+
+        assert result[0].content == "A red bar chart showing Q3 revenue."
+        assert result[0].content_type == "IMAGE"
+        assert result[0].metadata["storage_key"] == "images/doc-1/page-1.png"
+        assert result[0].metadata["base64_image"] == "ZmFrZSBpbWFnZSBkYXRh"
+        mock_caption.assert_called_once_with("ZmFrZSBpbWFnZSBkYXRh", "image/png")
+
+    def test_image_captioning_failure_keeps_original_piece(self):
+        from rag.extract import Piece
+        from rag.image_captioner import caption_images
+
+        pieces = [
+            Piece(
+                content="ZmFrZSBpbWFnZSBkYXRh",
+                content_type="IMAGE",
+                page="1",
+                metadata={"mime_type": "image/png"},
+            )
+        ]
+        with patch("rag.conf.get_config") as mock_config, patch(
+            "rag.image_captioner.caption_image", return_value=None
+        ) as mock_caption:
+            mock_config.return_value.image_captioner.enabled = True
+            mock_config.return_value.image_captioner.max_concurrency = 2
+            result = asyncio.run(caption_images(pieces, document_id="doc-1"))
+
+        assert result[0].content == "ZmFrZSBpbWFnZSBkYXRh"
+        assert result[0].content_type == "IMAGE"
+        mock_caption.assert_called_once()

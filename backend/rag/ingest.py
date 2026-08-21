@@ -4,7 +4,7 @@ Replaces the upstream admin-backend -> document-extractor -> rag-backend
 round-trip (three services, two HTTP hops, two generated OpenAPI clients) with
 one in-process function:
 
-    fetch -> extract -> chunk -> summarise -> embed+upsert -> mark READY
+    fetch -> extract -> caption images -> chunk -> summarise -> embed+upsert -> mark READY
 
 Re-ingesting a source deletes its previous chunks first, so ingestion is
 idempotent and never leaves orphaned vectors behind.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 from django.db import transaction
@@ -29,7 +30,9 @@ from rag.extract import (
     extract_sitemap,
     extract_url,
 )
+from rag.image_captioner import caption_images
 from rag.llm import flush_traces, get_trace_callbacks
+from rag.metrics import get_metrics, log_context
 from rag.models import Chunk, Document, SourceType, Status
 
 logger = logging.getLogger(__name__)
@@ -45,7 +48,11 @@ def ingest_document(document_id: str) -> int:
     Always leaves the document in a terminal state (READY or ERROR) — a stuck
     PROCESSING row is worse than a visible failure.
     """
+    start = time.perf_counter()
     document = Document.objects.get(pk=document_id)
+    metrics = get_metrics()
+    metrics.record_ingestion_start(str(document.id), document.source_type)
+
     document.status = Status.PROCESSING
     document.error_message = ""
     document.save(update_fields=["status", "error_message", "modified_at"])
@@ -59,14 +66,13 @@ def ingest_document(document_id: str) -> int:
         if not pieces:
             raise IngestionError("No readable content could be extracted from this source.")
 
+        pieces = asyncio.run(caption_images(pieces, document_id=str(document.id)))
+
         documents = pieces_to_documents(
             pieces,
             document_id=str(document.id),
             owner_id=document.owner_id,
             document_name=document.name,
-            # Pass the stable key (or source URI for web sources), never a
-            # pre-signed URL: those expire in minutes and are host-dependent.
-            # Citations presign at answer time.
             storage_key=document.storage_key,
             document_url=document.source_uri,
         )
@@ -76,26 +82,39 @@ def ingest_document(document_id: str) -> int:
         summaries = asyncio.run(add_summaries(documents, callbacks=callbacks))
         all_documents = documents + summaries
 
-        # Replace rather than append: re-ingest must not duplicate vectors.
         _purge_existing(document)
         vectordb.upload(all_documents)
         _persist_chunks(document, all_documents)
 
+        image_count = sum(1 for d in all_documents if d.metadata.get("type") == "IMAGE")
+        latency = time.perf_counter() - start
+
         document.chunk_count = len(all_documents)
         document.status = Status.READY
         document.save(update_fields=["chunk_count", "status", "modified_at"])
+
+        metrics.record_ingestion_success(
+            document_id=str(document.id),
+            chunks=len(all_documents),
+            summaries=len(summaries),
+            images=image_count,
+            latency=latency,
+        )
         logger.info(
-            "Ingested '%s': %d chunks (%d summaries).",
+            "Ingested '%s': %d chunks (%d summaries, %d images) in %.2fs.",
             document.name,
             len(all_documents),
             len(summaries),
+            image_count,
+            latency,
         )
         return len(all_documents)
 
     except Exception as exc:
+        latency = time.perf_counter() - start
+        metrics.record_ingestion_failure(str(document.id), str(exc)[:500], latency)
         logger.exception("Ingestion failed for document %s.", document_id)
         document.status = Status.ERROR
-        # Surfaced in the UI, so keep it readable, actionable and bounded.
         document.error_message = _explain(exc)[:2000]
         document.save(update_fields=["status", "error_message", "modified_at"])
         raise
@@ -104,16 +123,13 @@ def ingest_document(document_id: str) -> int:
 
 
 def _explain(exc: Exception) -> str:
-    """Turn opaque provider errors into something a user can act on.
-
-    "Connection error." tells nobody that LLM_API_KEY is unset.
-    """
+    """Turn opaque provider errors into something a user can act on."""
     from rag.conf import get_config
 
     name = type(exc).__name__
     text = str(exc)
 
-    if name in ("APIConnectionError", "OpenAIError") and "onnection" in text:
+    if name in ("APIConnectionError", "OpenAIError") and "onnection" in text.lower():
         base_url = get_config().embedder.base_url or get_config().llm.base_url or "the OpenAI API"
         return (
             f"Could not reach the model provider at {base_url}. "
@@ -126,6 +142,8 @@ def _explain(exc: Exception) -> str:
         return "The model provider rate-limited this request. Re-index in a few minutes."
     if name == "NotFoundError":
         return f"The configured model was not found by the provider: {text}"
+    if "timeout" in text.lower():
+        return "A request timed out. Check network connectivity and provider status, then retry."
     return text or name
 
 

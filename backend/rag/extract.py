@@ -13,6 +13,7 @@ Every extractor yields `Piece` objects, the local equivalent of upstream's
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import logging
@@ -91,9 +92,22 @@ def _try_docling(path: Path, name: str) -> list[Piece]:
                 markdown = item.export_to_markdown()
             except Exception:
                 continue
-            # Skip structural-only tables with no words in them.
             if any(character.isalnum() for character in markdown):
                 pieces.append(Piece(content=markdown, content_type="TABLE", page=page))
+        elif hasattr(item, "get_image") or type(item).__name__ == "PictureItem":
+            try:
+                image = item.get_image(result.document)
+                data = image.data if hasattr(image, "data") else image
+                pieces.append(
+                    Piece(
+                        content=base64.b64encode(data).decode("utf-8"),
+                        content_type="IMAGE",
+                        page=page,
+                        metadata={"mime_type": "image/png"},
+                    )
+                )
+            except Exception:
+                logger.debug("Failed to extract picture item on page %s.", page, exc_info=True)
         elif isinstance(item, TextItem):
             text = (item.text or "").strip()
             if text:
@@ -184,9 +198,24 @@ def _try_pypdf(path: Path) -> list[Piece]:
         try:
             text = (page.extract_text() or "").strip()
         except Exception:
-            continue
+            text = ""
         if text:
             pieces.append(Piece(content=text, content_type="TEXT", page=str(number)))
+
+        try:
+            for image in getattr(page, "images", []):
+                data = image.data if hasattr(image, "data") else image
+                if data:
+                    pieces.append(
+                        Piece(
+                            content=base64.b64encode(data).decode("utf-8"),
+                            content_type="IMAGE",
+                            page=str(number),
+                            metadata={"mime_type": getattr(image, "name", "image/png") or "image/png"},
+                        )
+                    )
+        except Exception:
+            logger.debug("pypdf image extraction failed on page %d.", number, exc_info=True)
     return pieces
 
 

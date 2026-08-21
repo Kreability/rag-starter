@@ -205,6 +205,23 @@ class IngestionSettings(BaseSettings):
     allowed_url_schemes: str = Field(default="https,http")
 
 
+class ImageCaptioningSettings(BaseSettings):
+    """VLM captioning for extracted images.
+
+    Enabled by default for enterprise-grade RAG: diagrams, charts, and images
+    are captioned with a strong vision model and embedded as IMAGE chunks.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="IMAGE_CAPTIONER_", case_sensitive=False, extra="ignore")
+
+    enabled: bool = Field(default=True)
+    # Model override for vision. Falls back to the chat LLM model when empty,
+    # but that only works if the chat model supports vision input.
+    model: str = Field(default="")
+    max_tokens: int = Field(default=1024)
+    max_concurrency: int = Field(default=4)
+
+
 class ErrorMessages(BaseSettings):
     """User-facing chat fallbacks. Ported from upstream ErrorMessages."""
 
@@ -243,6 +260,7 @@ class RagConfig:
         self.langfuse = LangfuseSettings()
         self.s3 = S3Settings()
         self.ingestion = IngestionSettings()
+        self.image_captioner = ImageCaptioningSettings()
         self.errors = ErrorMessages()
 
 
