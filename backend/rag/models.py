@@ -39,6 +39,14 @@ class ContentType(models.TextChoices):
     SUMMARY = "SUMMARY", _("Summary")
 
 
+class QualityScore(models.TextChoices):
+    """Ingestion quality levels."""
+
+    GOOD = "GOOD", _("Good")
+    WARNING = "WARNING", _("Warning")
+    BAD = "BAD", _("Bad")
+
+
 class Document(models.Model):
     """One ingested source: an uploaded file, a URL, a sitemap or a Confluence space."""
 
@@ -69,6 +77,15 @@ class Document(models.Model):
     task_id = models.CharField(_("celery task id"), max_length=255, blank=True, default="")
     # Source-specific options, e.g. {"space_key": "ENG"} for Confluence.
     source_options = models.JSONField(_("source options"), default=dict, blank=True)
+    # Latest ingestion report for quick admin access.
+    last_ingestion_report = models.ForeignKey(
+        "IngestionReport",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        verbose_name=_("last ingestion report"),
+    )
 
     created_at = models.DateTimeField(_("created at"), auto_now_add=True)
     modified_at = models.DateTimeField(_("modified at"), auto_now=True)
@@ -89,6 +106,51 @@ class Document(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class IngestionReport(models.Model):
+    """Per-ingestion diagnostics for a document."""
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="ingestion_reports", verbose_name=_("document")
+    )
+    # Page-level diagnostics
+    pages_detected = models.PositiveIntegerField(_("pages detected"), default=0)
+    pages_with_text = models.PositiveIntegerField(_("pages with text"), default=0)
+    pages_without_text = models.PositiveIntegerField(_("pages without text"), default=0)
+    total_extracted_chars = models.PositiveIntegerField(_("total extracted characters"), default=0)
+    avg_chars_per_page = models.FloatField(_("average characters per page"), default=0.0)
+    # Extraction metadata
+    extractor_used = models.CharField(_("extractor used"), max_length=255, blank=True, default="")
+    ocr_used = models.BooleanField(_("OCR used"), default=False)
+    ocr_language = models.CharField(_("OCR language"), max_length=64, blank=True, default="")
+    # Chunk counts by type
+    text_chunks = models.PositiveIntegerField(_("text chunks"), default=0)
+    table_chunks = models.PositiveIntegerField(_("table chunks"), default=0)
+    image_chunks = models.PositiveIntegerField(_("image chunks"), default=0)
+    summary_chunks = models.PositiveIntegerField(_("summary chunks"), default=0)
+    failed_summaries = models.PositiveIntegerField(_("failed summaries"), default=0)
+    # Pipeline status
+    embedding_status = models.CharField(_("embedding status"), max_length=32, blank=True, default="")
+    vector_upload_status = models.CharField(_("vector upload status"), max_length=32, blank=True, default="")
+    # Diagnostics
+    warnings = models.JSONField(_("warnings"), default=list, blank=True)
+    quality_score = models.CharField(
+        _("quality score"), max_length=16, choices=QualityScore.choices, default=QualityScore.WARNING
+    )
+    # Timing
+    ingestion_duration_seconds = models.FloatField(_("ingestion duration seconds"), default=0.0)
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True)
+
+    class Meta:
+        db_table = "rag_ingestion_reports"
+        verbose_name = _("ingestion report")
+        verbose_name_plural = _("ingestion reports")
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["document", "-created_at"])]
+
+    def __str__(self) -> str:
+        return f"{self.document.name} · {self.quality_score} · {self.created_at:%Y-%m-%d %H:%M}"
 
 
 class Chunk(models.Model):
@@ -172,3 +234,76 @@ class Message(models.Model):
 
     def __str__(self) -> str:
         return f"{self.role}: {self.content[:50]}"
+
+
+class AuditLog(models.Model):
+    """Immutable audit trail for compliance and forensics."""
+
+    class Action(models.TextChoices):
+        DOCUMENT_UPLOAD = "DOCUMENT_UPLOAD", _("Document Upload")
+        DOCUMENT_REINDEX = "DOCUMENT_REINDEX", _("Document Reindex")
+        DOCUMENT_DELETE = "DOCUMENT_DELETE", _("Document Delete")
+        QUERY = "QUERY", _("Query")
+        ADMIN_ACTION = "ADMIN_ACTION", _("Admin Action")
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="audit_logs",
+        verbose_name=_("actor"),
+    )
+    action = models.CharField(_("action"), max_length=32, choices=Action.choices)
+    resource_type = models.CharField(_("resource type"), max_length=64, blank=True, default="")
+    resource_id = models.CharField(_("resource ID"), max_length=255, blank=True, default="")
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(_("IP address"), null=True, blank=True)
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True)
+
+    class Meta:
+        db_table = "rag_audit_logs"
+        verbose_name = _("audit log")
+        verbose_name_plural = _("audit logs")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["actor", "-created_at"]),
+            models.Index(fields=["action", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.action} by {self.actor} at {self.created_at:%Y-%m-%d %H:%M}"
+
+
+class EvaluationReport(models.Model):
+    """RAGAS evaluation result for a specific query/answer pair."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="evaluations", verbose_name=_("document")
+    )
+    query = models.TextField(_("query"))
+    answer = models.TextField(_("answer"))
+    # RAGAS scores
+    faithfulness_score = models.FloatField(_("faithfulness score"), null=True, blank=True)
+    answer_relevancy_score = models.FloatField(_("answer relevancy score"), null=True, blank=True)
+    context_precision_score = models.FloatField(_("context precision score"), null=True, blank=True)
+    context_recall_score = models.FloatField(_("context recall score"), null=True, blank=True)
+    # Metadata
+    chunks_retrieved = models.PositiveIntegerField(_("chunks retrieved"), default=0)
+    evaluation_duration_seconds = models.FloatField(_("evaluation duration seconds"), default=0.0)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True)
+
+    class Meta:
+        db_table = "rag_evaluation_reports"
+        verbose_name = _("evaluation report")
+        verbose_name_plural = _("evaluation reports")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["document", "-created_at"]),
+            models.Index(fields=["-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Eval {self.id} · {self.document.name} · Faithfulness={self.faithfulness_score}"

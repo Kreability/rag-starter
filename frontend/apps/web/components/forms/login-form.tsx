@@ -5,13 +5,25 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useState, useTransition } from 'react'
 
+const inputStyle: React.CSSProperties = {
+  display: 'block',
+  width: '100%',
+  background: 'rgba(255,255,255,0.05)',
+  border: '1px solid var(--color-border)',
+  borderRadius: '10px',
+  color: 'var(--color-foreground)',
+  padding: '10px 14px',
+  fontSize: '14px',
+  outline: 'none',
+  marginTop: '6px'
+}
+
 export function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
-  // Preserve the page the user was trying to reach before being bounced here.
   const callbackUrl = searchParams.get('callbackUrl') ?? '/chat'
 
   const onSubmit = (formData: FormData) => {
@@ -24,28 +36,37 @@ export function LoginForm() {
       })
 
       if (!result?.ok) {
-        setError(
-          'Incorrect username or password — or the account has not been activated yet.'
-        )
+        setError('Incorrect username or password — or the account has not been activated yet.')
         return
       }
 
       router.push(callbackUrl)
-      // The session cookie is new; refresh so server components see it.
       router.refresh()
     })
   }
 
   return (
-    <form action={onSubmit} className="space-y-3">
+    <form action={onSubmit} className="space-y-4">
       {error && (
-        <p role="alert" className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div
+          role="alert"
+          className="rounded-xl px-4 py-3 text-sm"
+          style={{
+            background: 'rgba(239,68,68,0.08)',
+            border: '1px solid rgba(239,68,68,0.2)',
+            color: 'var(--color-destructive)'
+          }}
+        >
           {error}
-        </p>
+        </div>
       )}
 
       <div>
-        <label htmlFor="username" className="block text-xs text-gray-600">
+        <label
+          htmlFor="username"
+          className="text-xs font-medium"
+          style={{ color: 'var(--color-muted-foreground)' }}
+        >
           Username
         </label>
         <input
@@ -54,12 +75,16 @@ export function LoginForm() {
           type="text"
           required
           autoComplete="username"
-          className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          style={inputStyle}
         />
       </div>
 
       <div>
-        <label htmlFor="password" className="block text-xs text-gray-600">
+        <label
+          htmlFor="password"
+          className="text-xs font-medium"
+          style={{ color: 'var(--color-muted-foreground)' }}
+        >
           Password
         </label>
         <input
@@ -68,21 +93,25 @@ export function LoginForm() {
           type="password"
           required
           autoComplete="current-password"
-          className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          style={inputStyle}
         />
       </div>
 
       <button
         type="submit"
         disabled={isPending}
-        className="w-full rounded-lg bg-purple-600 px-4 py-2 text-sm text-white transition hover:bg-purple-700 disabled:bg-gray-300"
+        className="btn-primary w-full !py-2.5 !text-sm"
       >
         {isPending ? 'Signing in…' : 'Sign in'}
       </button>
 
-      <p className="text-center text-xs text-gray-500">
+      <p className="text-center text-xs" style={{ color: 'var(--color-muted-foreground)' }}>
         No account?{' '}
-        <Link href="/register" className="text-purple-700 underline">
+        <Link
+          href="/register"
+          className="underline"
+          style={{ color: 'var(--color-primary)' }}
+        >
           Register
         </Link>
       </p>

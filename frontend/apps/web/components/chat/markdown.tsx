@@ -37,7 +37,8 @@ function renderBlocks(content: string): ReactNode[] {
       blocks.push(
         <pre
           key={key++}
-          className="overflow-x-auto rounded-md bg-gray-900 p-3 text-[11px] leading-relaxed text-gray-100"
+          className="overflow-x-auto rounded-xl p-3 text-[11px] leading-relaxed"
+          style={{ background: 'rgba(0,0,0,0.4)', color: '#e2e8f0', border: '1px solid var(--color-border)' }}
         >
           <code data-language={language || undefined}>{body.join('\n')}</code>
         </pre>
@@ -51,7 +52,7 @@ function renderBlocks(content: string): ReactNode[] {
       const level = heading[1].length
       const sizes = ['text-base', 'text-sm', 'text-sm', 'text-xs']
       blocks.push(
-        <p key={key++} className={`${sizes[level - 1]} font-medium text-gray-900`}>
+        <p key={key++} className={`${sizes[level - 1]} font-medium`} style={{ color: 'var(--color-foreground)' }}>
           {renderInline(heading[2])}
         </p>
       )
@@ -125,19 +126,18 @@ function renderInline(text: string): ReactNode[] {
 
     if (token.startsWith('`')) {
       nodes.push(
-        <code key={key++} className="rounded bg-gray-200 px-1 py-0.5 text-[11px]">
+        <code key={key++} className="rounded px-1 py-0.5 text-[11px] font-mono" style={{ background: 'rgba(255,255,255,0.08)', color: 'var(--color-primary)' }}>
           {token.slice(1, -1)}
         </code>
       )
     } else if (token.startsWith('**')) {
       nodes.push(
-        <strong key={key++} className="font-medium">
+        <strong key={key++} className="font-medium" style={{ color: 'var(--color-foreground)' }}>
           {token.slice(2, -2)}
         </strong>
       )
     } else {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
-      // Only http(s) links render as anchors; javascript: URLs stay plain text.
       if (link && /^https?:\/\//i.test(link[2])) {
         nodes.push(
           <a
@@ -145,7 +145,8 @@ function renderInline(text: string): ReactNode[] {
             href={link[2]}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-purple-600 underline"
+            className="underline"
+            style={{ color: 'var(--color-primary)' }}
           >
             {link[1]}
           </a>

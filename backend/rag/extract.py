@@ -22,6 +22,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from rag.conf import get_config
+from rag.quality import IngestionDiagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -40,53 +41,87 @@ class Piece:
         return sha256(self.content.encode("utf-8")).hexdigest()
 
 
-def extract_file(path: Path, name: str) -> list[Piece]:
+def extract_file(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnostics]:
     """Extract content from a local file, walking the fallback chain."""
     config = get_config().ingestion
     extension = path.suffix.lower()
+    diagnostics = IngestionDiagnostics()
 
     if config.prefer_docling:
-        pieces = _try_docling(path, name)
+        pieces, diag = _try_docling(path, name)
         if pieces:
-            return pieces
+            diagnostics = diag
+            diagnostics.extractor_used = "docling"
+            return pieces, diagnostics
 
     if extension in {".txt", ".md"}:
-        return _extract_plain_text(path)
+        pieces, diag = _extract_plain_text(path)
+        diagnostics = diag
+        diagnostics.extractor_used = "plain_text"
+        return pieces, diagnostics
     if extension == ".csv":
-        return _extract_csv(path)
+        pieces, diag = _extract_csv(path)
+        diagnostics = diag
+        diagnostics.extractor_used = "csv_parser"
+        return pieces, diagnostics
 
-    pieces = _try_markitdown(path, name)
+    pieces, diag = _try_markitdown(path, name)
     if pieces:
-        return pieces
+        diagnostics = diag
+        diagnostics.extractor_used = "markitdown"
+        return pieces, diagnostics
 
     if extension == ".pdf":
-        pieces = _try_pypdf(path)
+        pieces, diag = _try_pypdf(path)
         if pieces:
-            return pieces
+            diagnostics = diag
+            diagnostics.extractor_used = "pypdf"
+            return pieces, diagnostics
 
     logger.warning("All extractors failed for '%s'; falling back to raw decode.", name)
-    return _extract_plain_text(path)
+    pieces, diag = _extract_plain_text(path)
+    diagnostics = diag
+    diagnostics.extractor_used = "plain_text_fallback"
+    return pieces, diagnostics
 
 
-def _try_docling(path: Path, name: str) -> list[Piece]:
-    """Docling extraction with table structure and OCR. Ported from
-    `extractor_api_lib/impl/extractors/file_extractors/docling_extractor.py`."""
+def _try_docling(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnostics]:
+    """Docling extraction with table structure and OCR."""
+    config = get_config().ingestion
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, OcrOptions
+        from docling.document_converter import DocumentConverter, FormatOption
         from docling_core.types.doc import TableItem, TextItem
     except ImportError:
         logger.debug("Docling not installed; skipping. Install with: uv sync --extra docling")
-        return []
+        return [], IngestionDiagnostics()
 
     try:
-        result = DocumentConverter().convert(str(path))
+        pipeline_options = PdfPipelineOptions()
+        if config.ocr_enabled:
+            languages = [lang.strip() for lang in config.ocr_languages.split(",") if lang.strip()]
+            pipeline_options.ocr_options = OcrOptions(lang=languages or ["eng"])
+
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: FormatOption(pipeline_options=pipeline_options),
+            }
+        )
+        result = converter.convert(str(path))
     except Exception:
         logger.warning("Docling failed on '%s'; falling back.", name, exc_info=True)
-        return []
+        return [], IngestionDiagnostics()
 
     pieces: list[Piece] = []
+    diagnostics = IngestionDiagnostics()
+    seen_pages: set[int] = set()
+
     for item, _level in result.document.iterate_items():
-        page = str(_resolve_page(item))
+        page_no = _resolve_page(item)
+        seen_pages.add(page_no)
+        page = str(page_no)
+
         if isinstance(item, TableItem):
             try:
                 markdown = item.export_to_markdown()
@@ -113,9 +148,32 @@ def _try_docling(path: Path, name: str) -> list[Piece]:
             if text:
                 pieces.append(Piece(content=text, content_type="TEXT", page=page))
 
+    diagnostics.pages_detected = len(seen_pages) if seen_pages else 0
+    for piece in pieces:
+        if piece.page and piece.page not in ("-1",):
+            try:
+                page_int = int(piece.page)
+                seen_pages.add(page_int)
+            except ValueError:
+                pass
+        if piece.content_type == "TEXT":
+            diagnostics.text_chunks += 1
+            diagnostics.total_extracted_chars += len(piece.content)
+            if piece.page and piece.page not in ("-1",):
+                diagnostics.pages_with_text += 1
+        elif piece.content_type == "TABLE":
+            diagnostics.table_chunks += 1
+        elif piece.content_type == "IMAGE":
+            diagnostics.image_chunks += 1
+
+    diagnostics.pages_without_text = diagnostics.pages_detected - diagnostics.pages_with_text
+    if config.ocr_enabled and diagnostics.pages_without_text > 0 and diagnostics.text_chunks > 0:
+        diagnostics.ocr_used = True
+        diagnostics.ocr_language = config.ocr_languages
+
     if pieces:
         logger.info("Docling extracted %d pieces from '%s'.", len(pieces), name)
-    return pieces
+    return pieces, diagnostics
 
 
 def _resolve_page(item) -> int:
@@ -129,32 +187,37 @@ def _resolve_page(item) -> int:
     return -1
 
 
-def _try_markitdown(path: Path, name: str) -> list[Piece]:
+def _try_markitdown(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnostics]:
     """MarkItDown covers PDF/DOCX/PPTX/XLSX/HTML/EPUB without pulling torch."""
     try:
         from markitdown import MarkItDown
     except ImportError:
         logger.debug("MarkItDown not installed; skipping.")
-        return []
+        return [], IngestionDiagnostics()
 
     try:
         result = MarkItDown().convert(str(path))
     except Exception:
         logger.warning("MarkItDown failed on '%s'; falling back.", name, exc_info=True)
-        return []
+        return [], IngestionDiagnostics()
 
     text = (getattr(result, "text_content", "") or "").strip()
     if not text:
-        return []
-    return _split_markdown_tables(text)
+        return [], IngestionDiagnostics()
+    pieces = _split_markdown_tables(text)
+    diagnostics = IngestionDiagnostics()
+    diagnostics.total_extracted_chars = len(text)
+    diagnostics.extractor_used = "markitdown"
+    for piece in pieces:
+        if piece.content_type == "TEXT":
+            diagnostics.text_chunks += 1
+        elif piece.content_type == "TABLE":
+            diagnostics.table_chunks += 1
+    return pieces, diagnostics
 
 
 def _split_markdown_tables(text: str) -> list[Piece]:
-    """Separate markdown tables from prose so each gets the right content type.
-
-    Tables are retrieved with their own threshold upstream, so keeping them
-    distinct materially improves table question answering.
-    """
+    """Separate markdown tables from prose so each gets the right content type."""
     pieces: list[Piece] = []
     buffer: list[str] = []
     table: list[str] = []
@@ -181,19 +244,22 @@ def _split_markdown_tables(text: str) -> list[Piece]:
     return pieces
 
 
-def _try_pypdf(path: Path) -> list[Piece]:
+def _try_pypdf(path: Path) -> tuple[list[Piece], IngestionDiagnostics]:
     """Last-resort PDF text extraction, one piece per page."""
     try:
         from pypdf import PdfReader
     except ImportError:
-        return []
+        return [], IngestionDiagnostics()
     try:
         reader = PdfReader(str(path))
     except Exception:
         logger.warning("pypdf failed on '%s'.", path.name, exc_info=True)
-        return []
+        return [], IngestionDiagnostics()
 
     pieces = []
+    diagnostics = IngestionDiagnostics()
+    diagnostics.pages_detected = len(reader.pages)
+
     for number, page in enumerate(reader.pages, start=1):
         try:
             text = (page.extract_text() or "").strip()
@@ -201,6 +267,8 @@ def _try_pypdf(path: Path) -> list[Piece]:
             text = ""
         if text:
             pieces.append(Piece(content=text, content_type="TEXT", page=str(number)))
+            diagnostics.pages_with_text += 1
+            diagnostics.total_extracted_chars += len(text)
 
         try:
             for image in getattr(page, "images", []):
@@ -216,20 +284,38 @@ def _try_pypdf(path: Path) -> list[Piece]:
                     )
         except Exception:
             logger.debug("pypdf image extraction failed on page %d.", number, exc_info=True)
-    return pieces
+
+    diagnostics.pages_without_text = diagnostics.pages_detected - diagnostics.pages_with_text
+    for piece in pieces:
+        if piece.content_type == "TEXT":
+            diagnostics.text_chunks += 1
+        elif piece.content_type == "TABLE":
+            diagnostics.table_chunks += 1
+        elif piece.content_type == "IMAGE":
+            diagnostics.image_chunks += 1
+    diagnostics.extractor_used = "pypdf"
+    return pieces, diagnostics
 
 
-def _extract_plain_text(path: Path) -> list[Piece]:
+def _extract_plain_text(path: Path) -> tuple[list[Piece], IngestionDiagnostics]:
     text = path.read_text(encoding="utf-8", errors="replace").strip()
-    return [Piece(content=text, content_type="TEXT")] if text else []
+    diagnostics = IngestionDiagnostics()
+    diagnostics.total_extracted_chars = len(text)
+    if text:
+        diagnostics.pages_detected = 1
+        diagnostics.pages_with_text = 1
+        diagnostics.text_chunks = 1
+        diagnostics.extractor_used = "plain_text"
+        return [Piece(content=text, content_type="TEXT")], diagnostics
+    return [], diagnostics
 
 
-def _extract_csv(path: Path) -> list[Piece]:
+def _extract_csv(path: Path) -> tuple[list[Piece], IngestionDiagnostics]:
     """Render a CSV as a markdown table so the LLM can read it."""
     with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         rows = list(csv.reader(handle))
     if not rows:
-        return []
+        return [], IngestionDiagnostics()
 
     output = io.StringIO()
     header, *body = rows
@@ -238,7 +324,12 @@ def _extract_csv(path: Path) -> list[Piece]:
     for row in body:
         padded = row + [""] * (len(header) - len(row))
         output.write("| " + " | ".join(padded[: len(header)]) + " |\n")
-    return [Piece(content=output.getvalue().strip(), content_type="TABLE")]
+    content = output.getvalue().strip()
+    diagnostics = IngestionDiagnostics()
+    diagnostics.pages_detected = 1
+    diagnostics.table_chunks = 1
+    diagnostics.extractor_used = "csv_parser"
+    return [Piece(content=content, content_type="TABLE")], diagnostics
 
 
 # --- remote sources -------------------------------------------------------
@@ -271,10 +362,7 @@ def extract_url(url: str) -> list[Piece]:
 
 
 def extract_sitemap(sitemap_url: str) -> list[Piece]:
-    """Walk a sitemap and extract every page it lists.
-
-    Ported from `extractor_api_lib/impl/extractors/sitemap_extractor.py`.
-    """
+    """Walk a sitemap and extract every page it lists."""
     import requests
     from bs4 import BeautifulSoup
 
@@ -290,7 +378,6 @@ def extract_sitemap(sitemap_url: str) -> list[Piece]:
     pieces: list[Piece] = []
     for url in urls:
         try:
-            # Each discovered URL is untrusted too — re-validate before fetching.
             validate_public_url(url)
             pieces.extend(extract_url(url))
         except Exception:
@@ -300,11 +387,7 @@ def extract_sitemap(sitemap_url: str) -> list[Piece]:
 
 
 def extract_confluence(url: str, space_key: str, token: str, verify_ssl: bool = True) -> list[Piece]:
-    """Confluence space ingestion.
-
-    Ported from `extractor_api_lib/impl/extractors/confluence_extractor.py`.
-    Requires the optional extra: uv sync --extra confluence
-    """
+    """Confluence space ingestion."""
     try:
         from langchain_community.document_loaders import ConfluenceLoader
     except ImportError as exc:

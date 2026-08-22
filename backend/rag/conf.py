@@ -158,7 +158,9 @@ class SmallTalkSettings(BaseSettings):
             r"^how are you([!?]| doing)[!?]?$,"
             r"^(thank you|thanks|thx|ty|thnx)[!. ]*$,"
             r"^(bye|goodbye|good bye|see you|cya|later|peace)[!. ]*$,"
-            r"^(who are you|what can you do|what do you do|what can you help me with)[!?]?$"
+            r"^(who are you|what can you do|what do you do|what can you help me with|"
+            r"where can you help|where you can help|where you can help me|"
+            r"what are you|what is this)[!?]?$"
         )
     )
 
@@ -200,6 +202,7 @@ class IngestionSettings(BaseSettings):
     # Prefer Docling when the optional extra is installed; MarkItDown otherwise.
     prefer_docling: bool = Field(default=True)
     ocr_languages: str = Field(default="eng")
+    ocr_enabled: bool = Field(default=True)
     sitemap_max_pages: int = Field(default=200)
     # SSRF guard: only these schemes may be fetched for URL/sitemap sources.
     allowed_url_schemes: str = Field(default="https,http")
@@ -220,6 +223,21 @@ class ImageCaptioningSettings(BaseSettings):
     model: str = Field(default="")
     max_tokens: int = Field(default=1024)
     max_concurrency: int = Field(default=4)
+
+
+class QualitySettings(BaseSettings):
+    """Ingestion quality scoring thresholds."""
+
+    model_config = SettingsConfigDict(env_prefix="QUALITY_", case_sensitive=False, extra="ignore")
+
+    # Text coverage ratios for scoring
+    bad_text_coverage_threshold: float = Field(default=0.3)
+    warning_text_coverage_threshold: float = Field(default=0.7)
+    # Average chars per page thresholds
+    bad_avg_chars_per_page: float = Field(default=50.0)
+    warning_avg_chars_per_page: float = Field(default=200.0)
+    # Summary failure ratio threshold
+    bad_summary_failure_ratio: float = Field(default=0.5)
 
 
 class ErrorMessages(BaseSettings):
@@ -261,6 +279,7 @@ class RagConfig:
         self.s3 = S3Settings()
         self.ingestion = IngestionSettings()
         self.image_captioner = ImageCaptioningSettings()
+        self.quality = QualitySettings()
         self.errors = ErrorMessages()
 
 

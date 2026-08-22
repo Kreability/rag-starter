@@ -7,7 +7,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
 from rag import storage
-from rag.models import Chunk, Conversation, Document, Message, SourceType
+from rag.models import AuditLog, Chunk, Conversation, Document, EvaluationReport, IngestionReport, Message, SourceType
 from rag.security import validate_public_url, validate_upload
 
 
@@ -53,6 +53,24 @@ class DocumentUploadSerializer(serializers.Serializer):
         value.sanitized_name = name
         value.resolved_content_type = content_type
         return value
+
+
+class BulkUploadSerializer(serializers.Serializer):
+    """Bulk upload: multiple files or a single ZIP archive."""
+
+    files = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        allow_empty=False,
+    )
+    zip_file = serializers.FileField(required=False, allow_empty_file=False)
+
+    def validate(self, attrs):
+        if not attrs.get("files") and not attrs.get("zip_file"):
+            raise serializers.ValidationError(
+                {"detail": "Provide either 'files' or 'zip_file'."}
+            )
+        return attrs
 
 
 class SourceUploadSerializer(serializers.Serializer):
@@ -131,6 +149,11 @@ class ChatRequestSerializer(serializers.Serializer):
     # Restrict retrieval to a single document when set.
     document_id = serializers.UUIDField(required=False, allow_null=True)
     stream = serializers.BooleanField(required=False, default=False)
+    answer_mode = serializers.ChoiceField(
+        choices=["default", "beginner", "deep_dive"],
+        required=False,
+        default="default",
+    )
 
     def validate_message(self, value):
         if not value.strip():
@@ -145,3 +168,68 @@ class ChatResponseSerializer(serializers.Serializer):
     citations = CitationSerializer(many=True)
     finish_reason = serializers.CharField(allow_blank=True)
     conversation_id = serializers.UUIDField()
+
+
+class IngestionReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IngestionReport
+        fields = [
+            "id",
+            "document",
+            "pages_detected",
+            "pages_with_text",
+            "pages_without_text",
+            "total_extracted_chars",
+            "avg_chars_per_page",
+            "extractor_used",
+            "ocr_used",
+            "ocr_language",
+            "text_chunks",
+            "table_chunks",
+            "image_chunks",
+            "summary_chunks",
+            "failed_summaries",
+            "embedding_status",
+            "vector_upload_status",
+            "warnings",
+            "quality_score",
+            "ingestion_duration_seconds",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AuditLog
+        fields = [
+            "id",
+            "actor",
+            "action",
+            "resource_type",
+            "resource_id",
+            "metadata",
+            "ip_address",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class EvaluationReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EvaluationReport
+        fields = [
+            "id",
+            "document",
+            "query",
+            "answer",
+            "faithfulness_score",
+            "answer_relevancy_score",
+            "context_precision_score",
+            "context_recall_score",
+            "chunks_retrieved",
+            "evaluation_duration_seconds",
+            "metadata",
+            "created_at",
+        ]
+        read_only_fields = fields

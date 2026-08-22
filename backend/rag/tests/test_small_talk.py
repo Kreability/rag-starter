@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from rag.graph import is_small_talk, _route_from_start, _conversational_node
+from rag.graph import is_small_talk, _route_from_start, _conversational_node, _classify_intent_node
 from rag.conf import get_config
 
 
@@ -25,6 +25,11 @@ def test_thanks_and_bye_are_small_talk():
 
 def test_capability_questions_are_small_talk():
     for message in ("what can you do", "who are you", "What can you help me with?"):
+        assert is_small_talk(message), message
+
+
+def test_where_help_questions_are_small_talk():
+    for message in ("where can you help", "where you can help me", "what is this"):
         assert is_small_talk(message), message
 
 
@@ -50,13 +55,13 @@ def test_route_from_start_small_talk():
 
 def test_route_from_start_knowledge_query():
     state = {"question": "how we can sell"}
-    assert _route_from_start(state) == "determine_language"
+    assert _route_from_start(state) == "classify_intent"
 
 
 def test_disabled_gate_sends_everything_to_retrieval():
     with patch.object(get_config().small_talk, "enabled", False):
         assert not is_small_talk("hey")
-        assert _route_from_start({"question": "hey"}) == "determine_language"
+        assert _route_from_start({"question": "hey"}) == "classify_intent"
 
 
 def test_template_mode_returns_static_reply_without_llm():
@@ -113,3 +118,59 @@ def test_llm_mode_error_falls_back_to_template():
 
     assert result["answer_text"] == get_config().small_talk.response
     assert result["citations"] == []
+
+
+def test_classify_intent_small_talk():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    fake_chain = AsyncMock()
+    fake_chain.ainvoke.return_value = type(
+        "FakeResponse", (), {"content": "small_talk"}
+    )()
+
+    with patch("rag.graph.get_chat_model", return_value=object()), patch(
+        "rag.graph.INTENT_CLASSIFICATION_PROMPT"
+    ) as prompt:
+        prompt.__or__.return_value = fake_chain
+        result = asyncio.run(_classify_intent_node({"question": "where can you help me?"}))
+
+    assert result["answer_text"] == get_config().small_talk.response
+    assert result["citations"] == []
+    assert result["finish_reason"] == "small_talk"
+
+
+def test_classify_intent_knowledge_query():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    fake_chain = AsyncMock()
+    fake_chain.ainvoke.return_value = type(
+        "FakeResponse", (), {"content": "knowledge_query"}
+    )()
+
+    with patch("rag.graph.get_chat_model", return_value=object()), patch(
+        "rag.graph.INTENT_CLASSIFICATION_PROMPT"
+    ) as prompt:
+        prompt.__or__.return_value = fake_chain
+        result = asyncio.run(_classify_intent_node({"question": "what is our refund policy?"}))
+
+    assert "intent" in result
+    assert result["intent"] == "knowledge_query"
+    assert "answer_text" not in result or result.get("answer_text") is None
+
+
+def test_classify_intent_fallback_on_error():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    fake_chain = AsyncMock()
+    fake_chain.ainvoke.side_effect = RuntimeError("model down")
+
+    with patch("rag.graph.get_chat_model", return_value=object()), patch(
+        "rag.graph.INTENT_CLASSIFICATION_PROMPT"
+    ) as prompt:
+        prompt.__or__.return_value = fake_chain
+        result = asyncio.run(_classify_intent_node({"question": "what is RAG?"}))
+
+    assert result["intent"] == "knowledge_query"

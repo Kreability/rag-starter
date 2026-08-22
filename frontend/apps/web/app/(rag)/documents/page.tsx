@@ -3,7 +3,6 @@ import { listDocuments, type RagDocument } from '@/lib/rag'
 
 export const metadata = { title: 'Documents · RAG System' }
 
-// Ingestion status changes out-of-band, so always render fresh.
 export const dynamic = 'force-dynamic'
 
 export default async function DocumentsPage() {
@@ -17,18 +16,27 @@ export default async function DocumentsPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="mx-auto max-w-5xl space-y-6 px-6 py-10">
       <header>
-        <h1 className="text-xl font-medium tracking-tight text-gray-900">Documents</h1>
-        <p className="mt-1 text-sm text-gray-600">
+        <span className="section-label">Knowledge Base</span>
+        <h1 className="text-h2 gradient-text mt-1">Documents</h1>
+        <p className="text-body mt-2" style={{ color: 'var(--color-muted-foreground)' }}>
           Everything here is indexed into your private knowledge base.
         </p>
       </header>
 
       {error ? (
-        <p role="alert" className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div
+          className="rounded-2xl px-5 py-4 text-sm"
+          role="alert"
+          style={{
+            background: 'rgba(239,68,68,0.08)',
+            border: '1px solid rgba(239,68,68,0.2)',
+            color: 'var(--color-destructive)'
+          }}
+        >
           {error}
-        </p>
+        </div>
       ) : (
         <DocumentManager documents={documents} />
       )}

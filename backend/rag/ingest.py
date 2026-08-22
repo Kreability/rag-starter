@@ -33,7 +33,8 @@ from rag.extract import (
 from rag.image_captioner import caption_images
 from rag.llm import flush_traces, get_trace_callbacks
 from rag.metrics import get_metrics, log_context
-from rag.models import Chunk, Document, SourceType, Status
+from rag.models import Chunk, Document, IngestionReport, SourceType, Status
+from rag.quality import IngestionDiagnostics, build_warnings, score_quality
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def ingest_document(document_id: str) -> int:
     )
 
     try:
-        pieces = _extract(document)
+        pieces, extract_diagnostics = _extract(document)
         if not pieces:
             raise IngestionError("No readable content could be extracted from this source.")
 
@@ -89,6 +90,42 @@ def ingest_document(document_id: str) -> int:
         image_count = sum(1 for d in all_documents if d.metadata.get("type") == "IMAGE")
         latency = time.perf_counter() - start
 
+        # Build ingestion quality report
+        extract_diagnostics.text_chunks = sum(1 for d in documents if d.metadata.get("type") == "TEXT")
+        extract_diagnostics.table_chunks = sum(1 for d in documents if d.metadata.get("type") == "TABLE")
+        extract_diagnostics.image_chunks = sum(1 for d in documents if d.metadata.get("type") == "IMAGE")
+        extract_diagnostics.summary_chunks = len(summaries)
+        extract_diagnostics.embedding_status = "completed"
+        extract_diagnostics.vector_upload_status = "completed"
+        extract_diagnostics.ingestion_duration_seconds = latency
+        extract_diagnostics.warnings = build_warnings(extract_diagnostics)
+        quality_score = score_quality(extract_diagnostics)
+
+        report = IngestionReport.objects.create(
+            document=document,
+            pages_detected=extract_diagnostics.pages_detected,
+            pages_with_text=extract_diagnostics.pages_with_text,
+            pages_without_text=extract_diagnostics.pages_without_text,
+            total_extracted_chars=extract_diagnostics.total_extracted_chars,
+            avg_chars_per_page=extract_diagnostics.avg_chars_per_page,
+            extractor_used=extract_diagnostics.extractor_used,
+            ocr_used=extract_diagnostics.ocr_used,
+            ocr_language=extract_diagnostics.ocr_language,
+            text_chunks=extract_diagnostics.text_chunks,
+            table_chunks=extract_diagnostics.table_chunks,
+            image_chunks=extract_diagnostics.image_chunks,
+            summary_chunks=extract_diagnostics.summary_chunks,
+            failed_summaries=extract_diagnostics.failed_summaries,
+            embedding_status=extract_diagnostics.embedding_status,
+            vector_upload_status=extract_diagnostics.vector_upload_status,
+            warnings=extract_diagnostics.warnings,
+            quality_score=quality_score,
+            ingestion_duration_seconds=latency,
+        )
+        try:
+            document.last_ingestion_report = report
+        except ValueError:
+            pass
         document.chunk_count = len(all_documents)
         document.status = Status.READY
         document.save(update_fields=["chunk_count", "status", "modified_at"])
@@ -101,12 +138,13 @@ def ingest_document(document_id: str) -> int:
             latency=latency,
         )
         logger.info(
-            "Ingested '%s': %d chunks (%d summaries, %d images) in %.2fs.",
+            "Ingested '%s': %d chunks (%d summaries, %d images) in %.2fs. Quality=%s",
             document.name,
             len(all_documents),
             len(summaries),
             image_count,
             latency,
+            quality_score,
         )
         return len(all_documents)
 
@@ -147,7 +185,7 @@ def _explain(exc: Exception) -> str:
     return text or name
 
 
-def _extract(document: Document) -> list[Piece]:
+def _extract(document: Document) -> tuple[list[Piece], IngestionDiagnostics]:
     """Dispatch to the right extractor for the source type."""
     if document.source_type == SourceType.FILE:
         if not document.storage_key:
@@ -158,10 +196,14 @@ def _extract(document: Document) -> list[Piece]:
             return extract_file(Path(handle.name), document.name)
 
     if document.source_type == SourceType.URL:
-        return extract_url(document.source_uri)
+        return extract_url(document.source_uri), IngestionDiagnostics(
+            extractor_used="url_fetcher", pages_detected=1
+        )
 
     if document.source_type == SourceType.SITEMAP:
-        return extract_sitemap(document.source_uri)
+        return extract_sitemap(document.source_uri), IngestionDiagnostics(
+            extractor_used="sitemap", pages_detected=1
+        )
 
     if document.source_type == SourceType.CONFLUENCE:
         import os
@@ -178,7 +220,7 @@ def _extract(document: Document) -> list[Piece]:
             space_key=space_key,
             token=token,
             verify_ssl=options.get("verify_ssl", True),
-        )
+        ), IngestionDiagnostics(extractor_used="confluence", pages_detected=1)
 
     raise IngestionError(f"Unsupported source type '{document.source_type}'.")
 

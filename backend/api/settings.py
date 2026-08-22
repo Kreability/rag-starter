@@ -309,7 +309,7 @@ UNFOLD = {
         "show_all_applications": True,
         "navigation": [
             {
-                "title": _("Knowledge base"),
+                "title": _("Knowledge Base"),
                 "separator": False,
                 "items": [
                     {
@@ -326,6 +326,38 @@ UNFOLD = {
                         "title": _("Conversations"),
                         "icon": "forum",
                         "link": reverse_lazy("admin:rag_conversation_changelist"),
+                    },
+                    {
+                        "title": _("Messages"),
+                        "icon": "chat",
+                        "link": reverse_lazy("admin:rag_message_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("Quality & Evaluation"),
+                "separator": False,
+                "items": [
+                    {
+                        "title": _("Ingestion Reports"),
+                        "icon": "analytics",
+                        "link": reverse_lazy("admin:rag_ingestionreport_changelist"),
+                    },
+                    {
+                        "title": _("Evaluation Reports"),
+                        "icon": "grade",
+                        "link": reverse_lazy("admin:rag_evaluationreport_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("Monitoring"),
+                "separator": False,
+                "items": [
+                    {
+                        "title": _("Audit Logs"),
+                        "icon": "history",
+                        "link": reverse_lazy("admin:rag_auditlog_changelist"),
                     },
                 ],
             },

@@ -8,9 +8,11 @@ is not authorisation, and documents are per-user data.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import uuid
+import zipfile
 
 from asgiref.sync import async_to_sync
 from django.db import transaction
@@ -23,14 +25,18 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
 
 from rag import storage
+from rag.audit import log_action, log_query
 from rag.graph import answer as run_answer
 from rag.graph import astream_answer
 from rag.ingest import delete_document
 from rag.llm import get_trace_callbacks
-from rag.models import Chunk, Conversation, Document, Message, SourceType, Status
+from rag.models import AuditLog, Chunk, Conversation, Document, EvaluationReport, IngestionReport, Message, SourceType, Status
 from rag.serializers import (
+    AuditLogSerializer,
+    BulkUploadSerializer,
     ChatRequestSerializer,
     ChatResponseSerializer,
     ChunkSerializer,
@@ -38,6 +44,8 @@ from rag.serializers import (
     ConversationSerializer,
     DocumentSerializer,
     DocumentUploadSerializer,
+    EvaluationReportSerializer,
+    IngestionReportSerializer,
     SourceUploadSerializer,
 )
 from rag.tasks import ingest_document_task
@@ -109,6 +117,86 @@ class DocumentViewSet(
         )
 
     @extend_schema(
+        request=BulkUploadSerializer,
+        responses={202: DocumentSerializer(many=True)},
+        description="Upload multiple files or a ZIP archive and queue them for ingestion.",
+    )
+    @action(detail=False, methods=["post"], url_path="bulk-upload")
+    def bulk_upload(self, request):
+        serializer = BulkUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        files_to_upload: list[tuple[str, io.BytesIO, str]] = []
+
+        if data.get("zip_file"):
+            zip_file = data["zip_file"]
+            try:
+                with zipfile.ZipFile(zip_file, "r") as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        name = info.filename
+                        if not name or name.endswith("/"):
+                            continue
+                        content = zf.read(info)
+                        content_type = getattr(info, "content_type", None) or "application/octet-stream"
+                        files_to_upload.append((name, io.BytesIO(content), content_type))
+            except zipfile.BadZipFile:
+                return Response(
+                    {"detail": "Invalid ZIP file."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if data.get("files"):
+            for uploaded in data["files"]:
+                try:
+                    name, content_type = validate_upload(uploaded)
+                except DjangoValidationError as exc:
+                    return Response(
+                        {"detail": exc.messages},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                content = uploaded.read()
+                files_to_upload.append((name, io.BytesIO(content), content_type))
+
+        if not files_to_upload:
+            return Response(
+                {"detail": "No valid files found."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        documents = []
+        for name, content_io, content_type in files_to_upload:
+            storage_key = f"{request.user.pk}/{uuid.uuid4()}/{name}"
+            try:
+                storage.upload_fileobj(content_io, storage_key, content_type)
+            except Exception:
+                logger.exception("Object storage upload failed for '%s'.", name)
+                continue
+
+            document, _ = Document.objects.update_or_create(
+                owner=request.user,
+                name=name,
+                defaults={
+                    "source_type": SourceType.FILE,
+                    "status": Status.PROCESSING,
+                    "storage_key": storage_key,
+                    "content_type": content_type,
+                    "size_bytes": content_io.getbuffer().nbytes,
+                    "error_message": "",
+                    "chunk_count": 0,
+                },
+            )
+            self._queue(document)
+            documents.append(document)
+
+        return Response(
+            DocumentSerializer(documents, many=True).data,
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    @extend_schema(
         request=SourceUploadSerializer,
         responses={202: DocumentSerializer},
         description="Ingest a URL, sitemap or Confluence space.",
@@ -148,6 +236,11 @@ class DocumentViewSet(
         document.error_message = ""
         document.save(update_fields=["status", "error_message", "modified_at"])
         self._queue(document)
+        log_document_reindex(
+            actor=request.user,
+            document_id=str(document.id),
+            ip_address=self._get_client_ip(request),
+        )
         return Response(DocumentSerializer(document).data, status=status.HTTP_202_ACCEPTED)
 
     @extend_schema(
@@ -172,9 +265,27 @@ class DocumentViewSet(
             else Response(serializer.data)
         )
 
+    @extend_schema(responses={200: IngestionReportSerializer(many=True)}, description="List ingestion reports for a document.")
+    @action(detail=True, methods=["get"], url_path="reports")
+    def reports(self, request, pk=None):
+        document = self.get_object()
+        queryset = document.ingestion_reports.all()
+        page = self.paginate_queryset(queryset)
+        serializer = IngestionReportSerializer(page if page is not None else queryset, many=True)
+        return (
+            self.get_paginated_response(serializer.data)
+            if page is not None
+            else Response(serializer.data)
+        )
+
     def perform_destroy(self, instance):
         """Delete vectors and the stored file alongside the row."""
         delete_document(instance)
+        log_document_delete(
+            actor=self.request.user,
+            document_id=str(instance.id),
+            ip_address=self._get_client_ip(self.request),
+        )
 
     @staticmethod
     def _queue(document: Document) -> None:
@@ -231,13 +342,18 @@ class ChatViewSet(viewsets.GenericViewSet):
         Message.objects.create(
             conversation=conversation, role=Message.Role.USER, content=data["message"]
         )
+        log_query(
+            actor=request.user,
+            query=data["message"],
+            ip_address=self._get_client_ip(request),
+        )
         callbacks = get_trace_callbacks(
             session_id=str(conversation.id), user_id=str(request.user.pk), tags=["chat"]
         )
 
         if data.get("stream"):
             return self._stream(
-                request, conversation, data["message"], history, document_id, callbacks
+                request, conversation, data["message"], history, document_id, data.get("answer_mode", "default"), callbacks
             )
 
         result = async_to_sync(run_answer)(
@@ -245,6 +361,7 @@ class ChatViewSet(viewsets.GenericViewSet):
             owner_id=request.user.pk,
             history=history,
             document_id=document_id,
+            answer_mode=data.get("answer_mode", "default"),
             callbacks=callbacks,
         )
         Message.objects.create(
@@ -257,7 +374,7 @@ class ChatViewSet(viewsets.GenericViewSet):
         self._title(conversation, data["message"])
         return Response({**result, "conversation_id": str(conversation.id)})
 
-    def _stream(self, request, conversation, message, history, document_id, callbacks):
+    def _stream(self, request, conversation, message, history, document_id, answer_mode, callbacks):
         """Server-sent events: citations first, then answer tokens."""
 
         def event_stream():
@@ -271,6 +388,7 @@ class ChatViewSet(viewsets.GenericViewSet):
                     owner_id=request.user.pk,
                     history=history,
                     document_id=document_id,
+                    answer_mode=answer_mode,
                     callbacks=callbacks,
                 ):
                     yield event
@@ -340,6 +458,14 @@ class ChatViewSet(viewsets.GenericViewSet):
 
     # --- helpers ---
 
+    @staticmethod
+    def _get_client_ip(request) -> str | None:
+        """Extract client IP from request, handling proxies."""
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR")
+
     def _get_conversation(self, request, conversation_id) -> Conversation:
         if conversation_id:
             conversation = Conversation.objects.filter(
@@ -370,3 +496,90 @@ class ChatViewSet(viewsets.GenericViewSet):
             conversation.save(update_fields=["title", "modified_at"])
         else:
             conversation.save(update_fields=["modified_at"])
+
+
+class AdminDashboardView(APIView):
+    """Aggregated ingestion quality dashboard for admins."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "total_documents": {"type": "integer"},
+                    "quality_distribution": {
+                        "type": "object",
+                        "properties": {
+                            "GOOD": {"type": "integer"},
+                            "WARNING": {"type": "integer"},
+                            "BAD": {"type": "integer"},
+                        },
+                    },
+                    "documents_with_warnings": {"type": "integer"},
+                    "recent_failed_ingestions": {"type": "integer"},
+                    "avg_ingestion_duration_seconds": {"type": "number"},
+                },
+            }
+        },
+        description="Admin dashboard with ingestion quality summary.",
+    )
+    def get(self, request):
+        user = request.user
+        documents = Document.objects.filter(owner=user)
+
+        total = documents.count()
+        quality_dist = {"GOOD": 0, "WARNING": 0, "BAD": 0}
+        documents_with_warnings = 0
+        total_duration = 0.0
+        duration_count = 0
+        recent_failed = 0
+
+        for doc in documents:
+            report = doc.last_ingestion_report
+            if report:
+                quality_dist[report.quality_score] = quality_dist.get(report.quality_score, 0) + 1
+                if report.warnings:
+                    documents_with_warnings += 1
+                if report.ingestion_duration_seconds > 0:
+                    total_duration += report.ingestion_duration_seconds
+                    duration_count += 1
+            if doc.status == Status.ERROR:
+                recent_failed += 1
+
+        avg_duration = total_duration / duration_count if duration_count > 0 else 0.0
+
+        return Response({
+            "total_documents": total,
+            "quality_distribution": quality_dist,
+            "documents_with_warnings": documents_with_warnings,
+            "recent_failed_ingestions": recent_failed,
+            "avg_ingestion_duration_seconds": round(avg_duration, 2),
+        })
+
+
+class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only audit log for compliance queries."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = AuditLogSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "audit"
+
+    def get_queryset(self):
+        user = self.request.user
+        return AuditLog.objects.filter(actor=user).order_by("-created_at")
+
+
+class EvaluationReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only evaluation reports for RAG quality metrics."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = EvaluationReportSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "evaluation"
+
+    def get_queryset(self):
+        user = self.request.user
+        return EvaluationReport.objects.filter(document__owner=user).order_by("-created_at")

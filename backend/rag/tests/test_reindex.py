@@ -27,6 +27,7 @@ import pytest
 from rag.conf import get_config
 from rag.ingest import _extract, _persist_chunks, _purge_existing, ingest_document
 from rag.models import Chunk, Document, SourceType, Status
+from rag.quality import IngestionDiagnostics
 
 
 def _load_env() -> None:
@@ -75,11 +76,26 @@ def _patch_ingest(document, extract_return=None, summarize_return=None):
     mock_doc.metadata = {"id": "mock-chunk-1", "type": "TEXT", "page": "1"}
     mock_doc.page_content = "mock chunk content"
 
+    mock_diagnostics = IngestionDiagnostics()
+    mock_diagnostics.text_chunks = len(extract_return)
+    mock_diagnostics.table_chunks = 0
+    mock_diagnostics.image_chunks = 0
+    mock_diagnostics.summary_chunks = 0
+    mock_diagnostics.failed_summaries = 0
+    mock_diagnostics.embedding_status = "completed"
+    mock_diagnostics.vector_upload_status = "completed"
+    mock_diagnostics.warnings = []
+    mock_diagnostics.quality_score = "GOOD"
+    mock_diagnostics.ingestion_duration_seconds = 0.1
+    mock_diagnostics.extractor_used = "test"
+    mock_diagnostics.ocr_used = False
+    mock_diagnostics.ocr_language = ""
+
     patches = [
         patch("rag.ingest.Document.objects.get", return_value=document),
         patch("rag.ingest.get_metrics"),
         patch("rag.ingest.get_trace_callbacks", return_value=[]),
-        patch("rag.ingest._extract", return_value=extract_return),
+        patch("rag.ingest._extract", return_value=(extract_return, mock_diagnostics)),
         patch("rag.ingest.caption_images", return_value=extract_return),
         patch("rag.ingest.pieces_to_documents", return_value=[mock_doc]),
         patch("rag.ingest.add_summaries", return_value=summarize_return),
@@ -87,6 +103,7 @@ def _patch_ingest(document, extract_return=None, summarize_return=None):
         patch("rag.vectordb.upload"),
         patch("rag.ingest._persist_chunks"),
         patch("rag.ingest.flush_traces"),
+        patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
         patch("django.db.transaction.atomic", lambda func: func),
     ]
     return patches
@@ -132,9 +149,10 @@ class TestStorageKeyLifecycle:
         document = _make_document(storage_key="1/abc-123/report.pdf")
 
         mock_download = MagicMock()
-        mock_extract_file = MagicMock(return_value=[
-            MagicMock(content_type="TEXT", content="text", page="1", metadata={})
-        ])
+        mock_extract_file = MagicMock(return_value=(
+            [MagicMock(content_type="TEXT", content="text", page="1", metadata={})],
+            IngestionDiagnostics(),
+        ))
 
         patches = [
             patch("rag.ingest.Document.objects.get", return_value=document),
@@ -149,6 +167,7 @@ class TestStorageKeyLifecycle:
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", mock_download),
             patch("rag.ingest.extract_file", mock_extract_file),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -187,6 +206,7 @@ class TestStorageKeyLifecycle:
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.extract_url", mock_extract_url),
             patch("rag.ingest.storage.download_to_path", mock_download),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -222,6 +242,7 @@ class TestStorageKeyLifecycle:
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.extract_sitemap", mock_extract_sitemap),
             patch("rag.ingest.storage.download_to_path", mock_download),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -280,9 +301,10 @@ class TestReindexIdempotency:
 
         mock_download = MagicMock()
         mock_download.side_effect = lambda key, path: Path(path).write_bytes(pdf_bytes)
-        mock_extract = MagicMock(return_value=[
-            MagicMock(content_type="TEXT", content="text " * 200, page="1", metadata={})
-        ])
+        mock_extract = MagicMock(return_value=(
+            [MagicMock(content_type="TEXT", content="text " * 200, page="1", metadata={})],
+            IngestionDiagnostics(),
+        ))
 
         patches = [
             patch("rag.ingest.Document.objects.get", return_value=document),
@@ -297,6 +319,7 @@ class TestReindexIdempotency:
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", mock_download),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -322,7 +345,7 @@ class TestReindexIdempotency:
             patch("rag.ingest.Document.objects.get", return_value=document),
             patch("rag.ingest.get_metrics"),
             patch("rag.ingest.get_trace_callbacks", return_value=[]),
-            patch("rag.ingest._extract", return_value=[MagicMock(content_type="TEXT", content="text", page="1", metadata={})]),
+            patch("rag.ingest._extract", return_value=([MagicMock(content_type="TEXT", content="text", page="1", metadata={})], IngestionDiagnostics())),
             patch("rag.ingest.caption_images", return_value=[]),
             patch("rag.ingest.pieces_to_documents", return_value=[MagicMock(metadata={"id": "c1", "type": "TEXT", "page": "1"})]),
             patch("rag.ingest.add_summaries", return_value=[]),
@@ -331,6 +354,7 @@ class TestReindexIdempotency:
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", return_value=None),
             patch("rag.ingest.Chunk.objects.filter", return_value=mock_qs),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -360,6 +384,7 @@ class TestMissingStorageKey:
             patch("rag.vectordb.upload"),
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -386,6 +411,7 @@ class TestMissingStorageKey:
             patch("rag.vectordb.upload"),
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -421,6 +447,7 @@ class TestCorruptFileHandling:
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", mock_download),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -450,6 +477,7 @@ class TestCorruptFileHandling:
             patch("rag.vectordb.upload"),
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -477,7 +505,7 @@ class TestDocumentMetadataPreservation:
             patch("rag.ingest.Document.objects.get", return_value=document),
             patch("rag.ingest.get_metrics"),
             patch("rag.ingest.get_trace_callbacks", return_value=[]),
-            patch("rag.ingest._extract", return_value=[MagicMock(content_type="TEXT", content="text", page="1", metadata={})]),
+            patch("rag.ingest._extract", return_value=([MagicMock(content_type="TEXT", content="text", page="1", metadata={})], IngestionDiagnostics())),
             patch("rag.ingest.caption_images", return_value=[]),
             patch("rag.ingest.pieces_to_documents", return_value=[MagicMock(metadata={"id": "c1", "type": "TEXT", "page": "1"})]),
             patch("rag.ingest.add_summaries", return_value=[]),
@@ -486,6 +514,7 @@ class TestDocumentMetadataPreservation:
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", return_value=None),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -507,7 +536,7 @@ class TestDocumentMetadataPreservation:
             patch("rag.ingest.Document.objects.get", return_value=document),
             patch("rag.ingest.get_metrics"),
             patch("rag.ingest.get_trace_callbacks", return_value=[]),
-            patch("rag.ingest._extract", return_value=[MagicMock(content_type="TEXT", content="text", page="1", metadata={})]),
+            patch("rag.ingest._extract", return_value=([MagicMock(content_type="TEXT", content="text", page="1", metadata={})], IngestionDiagnostics())),
             patch("rag.ingest.caption_images", return_value=[]),
             patch("rag.ingest.pieces_to_documents", return_value=[MagicMock(metadata={"id": "c1", "type": "TEXT", "page": "1"})]),
             patch("rag.ingest.add_summaries", return_value=[]),
@@ -516,6 +545,7 @@ class TestDocumentMetadataPreservation:
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", return_value=None),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)
@@ -538,9 +568,10 @@ class TestConcurrentReindexSafety:
 
         mock_download = MagicMock()
         mock_download.side_effect = lambda key, path: Path(path).write_bytes(pdf_bytes)
-        mock_extract = MagicMock(return_value=[
-            MagicMock(content_type="TEXT", content="text " * 200, page="1", metadata={})
-        ])
+        mock_extract = MagicMock(return_value=(
+            [MagicMock(content_type="TEXT", content="text " * 200, page="1", metadata={})],
+            IngestionDiagnostics(),
+        ))
 
         patches = [
             patch("rag.ingest.Document.objects.get", return_value=document),
@@ -555,6 +586,7 @@ class TestConcurrentReindexSafety:
             patch("rag.ingest._persist_chunks"),
             patch("rag.ingest.flush_traces"),
             patch("rag.ingest.storage.download_to_path", mock_download),
+            patch("rag.models.IngestionReport.objects.create", return_value=MagicMock()),
             patch("django.db.transaction.atomic", lambda func: func),
         ]
         _start_patches(patches)

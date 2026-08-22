@@ -10,11 +10,11 @@ import {
 } from '@/actions/document-actions'
 import type { DocumentStatus, RagDocument } from '@/lib/rag'
 
-const STATUS_STYLES: Record<DocumentStatus, string> = {
-  READY: 'bg-green-100 text-green-700',
-  PROCESSING: 'bg-amber-100 text-amber-700',
-  UPLOADING: 'bg-blue-100 text-blue-700',
-  ERROR: 'bg-red-100 text-red-700'
+const STATUS_COLORS: Record<DocumentStatus, { bg: string; color: string }> = {
+  READY:      { bg: 'rgba(115,223,240,0.1)',  color: 'var(--color-primary)' },
+  PROCESSING: { bg: 'rgba(251,191,36,0.1)',   color: '#fbbf24' },
+  UPLOADING:  { bg: 'rgba(96,165,250,0.1)',   color: '#60a5fa' },
+  ERROR:      { bg: 'rgba(239,68,68,0.1)',    color: 'var(--color-destructive)' }
 }
 
 export function DocumentManager({ documents }: { documents: RagDocument[] }) {
@@ -22,14 +22,12 @@ export function DocumentManager({ documents }: { documents: RagDocument[] }) {
   const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
-  // Ingestion is asynchronous, so poll while anything is still in flight.
   const hasPendingWork = documents.some(
-    (document) => document.status === 'PROCESSING' || document.status === 'UPLOADING'
+    (d) => d.status === 'PROCESSING' || d.status === 'UPLOADING'
   )
 
   useEffect(() => {
     if (!hasPendingWork) return
-    // Poll slow enough to stay far under the API's per-hour list throttle.
     const timer = setInterval(() => router.refresh(), 10000)
     return () => clearInterval(timer)
   }, [hasPendingWork, router])
@@ -44,16 +42,30 @@ export function DocumentManager({ documents }: { documents: RagDocument[] }) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {error && (
-        <p role="alert" className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div
+          role="alert"
+          className="rounded-2xl px-5 py-4 text-sm"
+          style={{
+            background: 'rgba(239,68,68,0.08)',
+            border: '1px solid rgba(239,68,68,0.2)',
+            color: 'var(--color-destructive)'
+          }}
+        >
           {error}
-        </p>
+        </div>
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <UploadCard disabled={isPending} onSubmit={(formData) => run(() => uploadDocumentAction(formData))} />
-        <SourceCard disabled={isPending} onSubmit={(formData) => run(() => ingestSourceAction(formData))} />
+        <UploadCard
+          disabled={isPending}
+          onSubmit={(fd) => run(() => uploadDocumentAction(fd))}
+        />
+        <SourceCard
+          disabled={isPending}
+          onSubmit={(fd) => run(() => ingestSourceAction(fd))}
+        />
       </div>
 
       <DocumentTable
@@ -66,114 +78,127 @@ export function DocumentManager({ documents }: { documents: RagDocument[] }) {
   )
 }
 
+/* ─── Upload card ─────────────────────────────────────────────────────────── */
 function UploadCard({
   disabled,
   onSubmit
 }: {
   disabled: boolean
-  onSubmit: (formData: FormData) => void
+  onSubmit: (fd: FormData) => void
 }) {
   const formRef = useRef<HTMLFormElement>(null)
 
   return (
     <form
       ref={formRef}
-      action={(formData) => {
-        onSubmit(formData)
-        formRef.current?.reset()
-      }}
-      className="rounded-xl border border-gray-200 bg-white p-5"
+      action={(fd) => { onSubmit(fd); formRef.current?.reset() }}
+      className="glass-card p-5 space-y-4"
     >
-      <h2 className="text-sm font-medium text-gray-900">Upload a file</h2>
-      <p className="mt-1 text-xs text-gray-500">
-        PDF, Word, PowerPoint, Excel, CSV, Markdown, HTML, EPUB or images. Up to 50 MB.
-      </p>
+      <div>
+        <h2 className="text-label-sm" style={{ color: 'var(--color-foreground)' }}>
+          Upload a file
+        </h2>
+        <p className="mt-1 text-xs" style={{ color: 'var(--color-muted-foreground)' }}>
+          PDF, Word, PowerPoint, Excel, CSV, Markdown, HTML, EPUB or images. Up to 50 MB.
+        </p>
+      </div>
+
       <input
         type="file"
         name="file"
         required
         aria-label="File to upload"
         accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md,.html,.htm,.xml,.json,.epub,.png,.jpg,.jpeg"
-        className="mt-3 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-purple-50 file:px-3 file:py-2 file:text-xs file:text-purple-700 hover:file:bg-purple-100"
+        className="block w-full text-xs"
+        style={{ color: 'var(--color-muted-foreground)' }}
       />
-      <button
-        type="submit"
-        disabled={disabled}
-        className="mt-3 rounded-lg bg-purple-600 px-4 py-2 text-xs text-white transition hover:bg-purple-700 disabled:bg-gray-300"
-      >
-        Upload and index
+
+      <button type="submit" disabled={disabled} className="btn-primary !py-2 !px-5 !text-sm">
+        Upload &amp; index
       </button>
     </form>
   )
 }
 
+/* ─── Source card ─────────────────────────────────────────────────────────── */
 function SourceCard({
   disabled,
   onSubmit
 }: {
   disabled: boolean
-  onSubmit: (formData: FormData) => void
+  onSubmit: (fd: FormData) => void
 }) {
   const [sourceType, setSourceType] = useState<'URL' | 'SITEMAP' | 'CONFLUENCE'>('URL')
   const formRef = useRef<HTMLFormElement>(null)
 
+  const inputStyle = {
+    background: 'rgba(255,255,255,0.05)',
+    border: '1px solid var(--color-border)',
+    borderRadius: '10px',
+    color: 'var(--color-foreground)',
+    padding: '8px 12px',
+    fontSize: '13px',
+    width: '100%',
+    outline: 'none'
+  }
+
   return (
     <form
       ref={formRef}
-      action={(formData) => {
-        onSubmit(formData)
-        formRef.current?.reset()
-      }}
-      className="rounded-xl border border-gray-200 bg-white p-5"
+      action={(fd) => { onSubmit(fd); formRef.current?.reset() }}
+      className="glass-card p-5 space-y-4"
     >
-      <h2 className="text-sm font-medium text-gray-900">Ingest a source</h2>
-      <p className="mt-1 text-xs text-gray-500">
-        Crawl a web page, a whole sitemap, or a Confluence space.
-      </p>
+      <div>
+        <h2 className="text-label-sm" style={{ color: 'var(--color-foreground)' }}>
+          Ingest a source
+        </h2>
+        <p className="mt-1 text-xs" style={{ color: 'var(--color-muted-foreground)' }}>
+          Crawl a web page, a whole sitemap, or a Confluence space.
+        </p>
+      </div>
 
-      <select
-        name="source_type"
-        value={sourceType}
-        onChange={(event) => setSourceType(event.target.value as typeof sourceType)}
-        aria-label="Source type"
-        className="mt-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-xs"
-      >
-        <option value="URL">Single web page</option>
-        <option value="SITEMAP">Sitemap</option>
-        <option value="CONFLUENCE">Confluence space</option>
-      </select>
+      <div className="space-y-2">
+        <select
+          name="source_type"
+          value={sourceType}
+          onChange={(e) => setSourceType(e.target.value as typeof sourceType)}
+          aria-label="Source type"
+          style={inputStyle}
+        >
+          <option value="URL">Single web page</option>
+          <option value="SITEMAP">Sitemap</option>
+          <option value="CONFLUENCE">Confluence space</option>
+        </select>
 
-      <input
-        type="url"
-        name="source_uri"
-        required
-        placeholder="https://example.com/docs"
-        aria-label="Source URL"
-        className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-xs"
-      />
-
-      {sourceType === 'CONFLUENCE' && (
         <input
-          type="text"
-          name="space_key"
+          type="url"
+          name="source_uri"
           required
-          placeholder="Space key (e.g. ENG)"
-          aria-label="Confluence space key"
-          className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-xs"
+          placeholder="https://example.com/docs"
+          aria-label="Source URL"
+          style={inputStyle}
         />
-      )}
 
-      <button
-        type="submit"
-        disabled={disabled}
-        className="mt-3 rounded-lg bg-purple-600 px-4 py-2 text-xs text-white transition hover:bg-purple-700 disabled:bg-gray-300"
-      >
+        {sourceType === 'CONFLUENCE' && (
+          <input
+            type="text"
+            name="space_key"
+            required
+            placeholder="Space key (e.g. ENG)"
+            aria-label="Confluence space key"
+            style={inputStyle}
+          />
+        )}
+      </div>
+
+      <button type="submit" disabled={disabled} className="btn-primary !py-2 !px-5 !text-sm">
         Ingest
       </button>
     </form>
   )
 }
 
+/* ─── Document table ──────────────────────────────────────────────────────── */
 function DocumentTable({
   documents,
   disabled,
@@ -187,54 +212,81 @@ function DocumentTable({
 }) {
   if (documents.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center">
-        <p className="text-sm text-gray-500">No documents yet.</p>
-        <p className="mt-1 text-xs text-gray-400">
-          Upload a file or ingest a URL to build your knowledge base.
+      <div
+        className="rounded-3xl p-12 text-center"
+        style={{ border: '1px dashed var(--color-border)' }}
+      >
+        <p className="text-sm" style={{ color: 'var(--color-muted-foreground)' }}>
+          No documents yet.
+        </p>
+        <p className="mt-1 text-xs" style={{ color: 'var(--color-muted-foreground)', opacity: 0.6 }}>
+          Upload a file or ingest a URL above to build your knowledge base.
         </p>
       </div>
     )
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+    <div
+      className="overflow-hidden rounded-3xl"
+      style={{ border: '1px solid var(--color-border)', background: 'var(--color-card)' }}
+    >
       <table className="w-full text-left text-xs">
-        <thead className="bg-gray-50 text-gray-500">
+        <thead style={{ borderBottom: '1px solid var(--color-border)', background: 'rgba(255,255,255,0.02)' }}>
           <tr>
-            <th className="px-4 py-3 font-medium">Name</th>
-            <th className="px-4 py-3 font-medium">Type</th>
-            <th className="px-4 py-3 font-medium">Status</th>
-            <th className="px-4 py-3 font-medium">Chunks</th>
-            <th className="px-4 py-3 font-medium sr-only">Actions</th>
+            {['Name', 'Type', 'Status', 'Chunks', ''].map((col) => (
+              <th
+                key={col}
+                className={`px-4 py-3 font-medium ${col === '' ? 'sr-only' : ''}`}
+                style={{ color: 'var(--color-muted-foreground)' }}
+              >
+                {col || 'Actions'}
+              </th>
+            ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100">
-          {documents.map((document) => (
-            <tr key={document.id}>
+        <tbody>
+          {documents.map((doc, i) => (
+            <tr
+              key={doc.id}
+              style={i > 0 ? { borderTop: '1px solid var(--color-border)' } : undefined}
+            >
               <td className="max-w-xs px-4 py-3">
-                <p className="truncate text-gray-900">{document.name}</p>
-                {document.error_message && (
-                  <p className="mt-0.5 truncate text-[11px] text-red-600" title={document.error_message}>
-                    {document.error_message}
+                <p className="truncate" style={{ color: 'var(--color-foreground)' }}>
+                  {doc.name}
+                </p>
+                {doc.error_message && (
+                  <p
+                    className="mt-0.5 truncate text-[11px]"
+                    title={doc.error_message}
+                    style={{ color: 'var(--color-destructive)' }}
+                  >
+                    {doc.error_message}
                   </p>
                 )}
               </td>
-              <td className="px-4 py-3 text-gray-500">{document.source_type}</td>
+              <td className="px-4 py-3" style={{ color: 'var(--color-muted-foreground)' }}>
+                {doc.source_type}
+              </td>
               <td className="px-4 py-3">
                 <span
-                  className={`rounded-full px-2 py-0.5 text-[11px] ${STATUS_STYLES[document.status]}`}
+                  className="rounded-full px-2.5 py-0.5 text-[11px] font-medium"
+                  style={STATUS_COLORS[doc.status]}
                 >
-                  {document.status}
+                  {doc.status}
                 </span>
               </td>
-              <td className="px-4 py-3 text-gray-500">{document.chunk_count}</td>
+              <td className="px-4 py-3" style={{ color: 'var(--color-muted-foreground)' }}>
+                {doc.chunk_count}
+              </td>
               <td className="px-4 py-3">
                 <div className="flex justify-end gap-2">
                   <button
                     type="button"
                     disabled={disabled}
-                    onClick={() => onReindex(document.id)}
-                    className="rounded px-2 py-1 text-[11px] text-gray-600 transition hover:bg-gray-100 disabled:opacity-50"
+                    onClick={() => onReindex(doc.id)}
+                    className="rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-40"
+                    style={{ color: 'var(--color-muted-foreground)', background: 'rgba(255,255,255,0.05)' }}
                   >
                     Re-index
                   </button>
@@ -242,11 +294,12 @@ function DocumentTable({
                     type="button"
                     disabled={disabled}
                     onClick={() => {
-                      if (confirm(`Delete "${document.name}" and all of its chunks?`)) {
-                        onDelete(document.id)
+                      if (confirm(`Delete "${doc.name}" and all of its chunks?`)) {
+                        onDelete(doc.id)
                       }
                     }}
-                    className="rounded px-2 py-1 text-[11px] text-red-600 transition hover:bg-red-50 disabled:opacity-50"
+                    className="rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-40"
+                    style={{ color: 'var(--color-destructive)', background: 'rgba(239,68,68,0.08)' }}
                   >
                     Delete
                   </button>

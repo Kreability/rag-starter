@@ -35,6 +35,9 @@ from rag.llm import get_chat_model
 from rag.storage import presigned_url
 from rag.prompts import (
     ANSWER_GENERATION_PROMPT,
+    ANSWER_GENERATION_BEGINNER_PROMPT,
+    ANSWER_GENERATION_DEEP_DIVE_PROMPT,
+    INTENT_CLASSIFICATION_PROMPT,
     LANGUAGE_DETECTION_PROMPT,
     QUESTION_REPHRASING_PROMPT,
     SMALL_TALK_PROMPT,
@@ -51,6 +54,7 @@ class GraphNodeNames(StrEnum):
     GENERATE = "generate"
     ERROR_NODE = "error_node"
     CONVERSATIONAL = "conversational"
+    CLASSIFY_INTENT = "classify_intent"
 
 
 class AnswerGraphState(TypedDict, total=False):
@@ -60,12 +64,23 @@ class AnswerGraphState(TypedDict, total=False):
     history: str
     owner_id: int
     document_id: str | None
+    answer_mode: str
     documents: Annotated[list[Document], operator.add]
     answer_text: str | None
     citations: list[dict]
     finish_reason: str
     error_messages: Annotated[list[str], operator.add]
     finish_reasons: Annotated[list[str], operator.add]
+
+
+def get_answer_prompt(answer_mode: str = "default"):
+    """Select the answer prompt based on the requested mode."""
+    mode = (answer_mode or "default").lower()
+    if mode == "beginner":
+        return ANSWER_GENERATION_BEGINNER_PROMPT
+    if mode == "deep_dive":
+        return ANSWER_GENERATION_DEEP_DIVE_PROMPT
+    return ANSWER_GENERATION_PROMPT
 
 
 def format_history(messages: list[dict]) -> str:
@@ -158,8 +173,26 @@ def _route_from_start(state: AnswerGraphState) -> str:
     return (
         GraphNodeNames.CONVERSATIONAL
         if is_small_talk(state["question"])
-        else GraphNodeNames.DETERMINE_LANGUAGE
+        else GraphNodeNames.CLASSIFY_INTENT
     )
+
+
+async def _classify_intent_node(state: AnswerGraphState, config=None) -> dict:
+    """LLM-based intent classifier. Runs after the regex gate."""
+    question = state["question"]
+    try:
+        chain = INTENT_CLASSIFICATION_PROMPT | get_chat_model()
+        response = await chain.ainvoke({"question": question}, config=config)
+        intent = getattr(response, "content", str(response)).strip().lower()
+    except Exception:
+        logger.warning("Intent classification failed; assuming knowledge query.", exc_info=True)
+        intent = "knowledge_query"
+
+    if intent == "small_talk":
+        logger.debug("LLM classified '%s' as small talk.", question)
+        return {"answer_text": get_config().small_talk.response, "citations": [], "finish_reason": "small_talk"}
+    logger.debug("LLM classified '%s' as knowledge query.", question)
+    return {"intent": "knowledge_query"}
 
 
 # --- nodes ----------------------------------------------------------------
@@ -237,7 +270,8 @@ async def _retrieve_node(state: AnswerGraphState) -> dict:
 async def _generate_node(state: AnswerGraphState, config=None) -> dict:
     errors = get_config().errors
     try:
-        chain = ANSWER_GENERATION_PROMPT | get_chat_model()
+        prompt = get_answer_prompt(state.get("answer_mode", "default"))
+        chain = prompt | get_chat_model()
         response = await chain.ainvoke(
             {
                 "question": state["question"],
@@ -302,9 +336,18 @@ def _docs_retrieved_edge(state: AnswerGraphState) -> str:
     return GraphNodeNames.GENERATE if state.get("documents") else GraphNodeNames.ERROR_NODE
 
 
+def _intent_classified_edge(state: AnswerGraphState) -> str:
+    return (
+        GraphNodeNames.CONVERSATIONAL
+        if state.get("intent") == "small_talk" or state.get("answer_text")
+        else GraphNodeNames.DETERMINE_LANGUAGE
+    )
+
+
 def build_graph():
     graph = StateGraph(AnswerGraphState)
     graph.add_node(GraphNodeNames.CONVERSATIONAL, _conversational_node)
+    graph.add_node(GraphNodeNames.CLASSIFY_INTENT, _classify_intent_node)
     graph.add_node(GraphNodeNames.DETERMINE_LANGUAGE, _determine_language_node)
     graph.add_node(GraphNodeNames.REPHRASE, _rephrase_node)
     graph.add_node(GraphNodeNames.RETRIEVE, _retrieve_node)
@@ -314,6 +357,11 @@ def build_graph():
     graph.add_conditional_edges(
         START,
         _route_from_start,
+        [GraphNodeNames.CONVERSATIONAL, GraphNodeNames.CLASSIFY_INTENT],
+    )
+    graph.add_conditional_edges(
+        GraphNodeNames.CLASSIFY_INTENT,
+        _intent_classified_edge,
         [GraphNodeNames.CONVERSATIONAL, GraphNodeNames.DETERMINE_LANGUAGE],
     )
     graph.add_edge(GraphNodeNames.CONVERSATIONAL, END)
@@ -345,6 +393,7 @@ async def answer(
     owner_id: int,
     history: list[dict] | None = None,
     document_id: str | None = None,
+    answer_mode: str = "default",
     callbacks: list | None = None,
 ) -> dict:
     """Run the full graph and return `{answer, citations, finish_reason}`."""
@@ -357,6 +406,7 @@ async def answer(
         "history": format_history(history or []),
         "owner_id": owner_id,
         "document_id": document_id,
+        "answer_mode": answer_mode,
         "documents": [],
         "error_messages": [],
         "finish_reasons": [],
@@ -375,6 +425,7 @@ async def astream_answer(
     owner_id: int,
     history: list[dict] | None = None,
     document_id: str | None = None,
+    answer_mode: str = "default",
     callbacks: list | None = None,
 ):
     """Stream the answer.
@@ -429,7 +480,8 @@ async def astream_answer(
     citations = [document_to_citation(document) for document in documents]
     yield {"type": "citations", "citations": citations}
 
-    chain = ANSWER_GENERATION_PROMPT | get_chat_model()
+    prompt = get_answer_prompt(answer_mode)
+    chain = prompt | get_chat_model()
     payload = {
         "question": question,
         "history": formatted_history,
