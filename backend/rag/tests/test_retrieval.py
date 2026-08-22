@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from langchain_core.documents import Document
 
+from rag.conf import get_config
 from rag.graph import build_context, document_to_citation, format_history
 from rag.retrieval import _early_prune, _expand_summaries, _remove_duplicates
 
@@ -77,7 +78,8 @@ class TestEarlyPrune:
     def test_prunes_to_total_k_by_score(self):
         documents = [make_document(str(i), score=i / 100) for i in range(30)]
         result = _early_prune(documents)
-        assert len(result) == 10
+        expected = get_config().retriever.total_k_documents
+        assert len(result) == expected
         # Highest scores survive.
         assert result[0].metadata["score"] > result[-1].metadata["score"]
 
