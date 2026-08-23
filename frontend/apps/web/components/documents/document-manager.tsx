@@ -13,6 +13,7 @@ import type { DocumentStatus, RagDocument } from '@/lib/rag'
 const STATUS_COLORS: Record<DocumentStatus, { bg: string; color: string }> = {
   READY:      { bg: 'rgba(115,223,240,0.1)',  color: 'var(--color-primary)' },
   PROCESSING: { bg: 'rgba(251,191,36,0.1)',   color: '#fbbf24' },
+  ENRICHING:  { bg: 'rgba(168,85,247,0.1)',    color: '#c084fc' },
   UPLOADING:  { bg: 'rgba(96,165,250,0.1)',   color: '#60a5fa' },
   ERROR:      { bg: 'rgba(239,68,68,0.1)',    color: 'var(--color-destructive)' }
 }
@@ -23,7 +24,7 @@ export function DocumentManager({ documents }: { documents: RagDocument[] }) {
   const [isPending, startTransition] = useTransition()
 
   const hasPendingWork = documents.some(
-    (d) => d.status === 'PROCESSING' || d.status === 'UPLOADING'
+    (d) => d.status === 'PROCESSING' || d.status === 'ENRICHING' || d.status === 'UPLOADING'
   )
 
   useEffect(() => {

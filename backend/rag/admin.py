@@ -17,8 +17,39 @@ from rag.models import (
     Message,
     Status,
     QualityScore,
+    UsageRecord,
 )
 from rag.tasks import ingest_document_task
+
+
+@admin.register(UsageRecord)
+class UsageRecordAdmin(ModelAdmin):
+    list_display = [
+        "organization",
+        "operation",
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "created_at",
+    ]
+    list_filter = ["operation", "model", "created_at"]
+    search_fields = ["organization__name", "model"]
+    list_per_page = 50
+    date_hierarchy = "created_at"
+    autocomplete_fields = ["organization"]
+    readonly_fields = [
+        "organization",
+        "operation",
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "created_at",
+    ]
+
+    @admin.display(description=_("Total tokens"))
+    def total_tokens(self, obj):
+        return obj.prompt_tokens + obj.completion_tokens
 
 
 # ── inlines ──────────────────────────────────────────────────────────────────
@@ -50,25 +81,27 @@ class MessageInline(TabularInline):
 class DocumentAdmin(ModelAdmin):
     list_display = [
         "name",
-        "owner",
+        "organization",
+        "uploaded_by",
+        "is_private",
         "source_type",
         "status_badge",
         "chunk_count",
         "quality_badge",
         "created_at",
     ]
-    list_display_links = ["name", "owner"]
+    list_display_links = ["name", "organization"]
     list_filter = ["status", "source_type", "created_at"]
-    search_fields = ["name", "source_uri", "owner__username"]
+    search_fields = ["name", "source_uri", "organization__name", "uploaded_by__username"]
     list_per_page = 25
     date_hierarchy = "created_at"
-    autocomplete_fields = ["owner"]
+    autocomplete_fields = ["organization", "uploaded_by"]
     inlines = [ChunkInline]
     actions = ["reindex_documents", "delete_selected"]
 
     fieldsets = (
         (_("Source"), {
-            "fields": ["name", "source_type", "source_uri", "source_options"],
+            "fields": ["name", "organization", "uploaded_by", "is_private", "source_type", "source_uri", "source_options"],
             "icon": "upload",
         }),
         (_("Storage"), {
@@ -99,6 +132,7 @@ class DocumentAdmin(ModelAdmin):
         color = {
             Status.UPLOADING: "orange",
             Status.PROCESSING: "blue",
+            Status.ENRICHING: "purple",
             Status.READY: "green",
             Status.ERROR: "red",
         }.get(obj.status, "gray")
@@ -172,7 +206,7 @@ class IngestionReportAdmin(ModelAdmin):
     ]
     list_display_links = ["id", "document"]
     list_filter = ["quality_score", "created_at"]
-    search_fields = ["document__name", "document__owner__username"]
+    search_fields = ["document__name", "document__organization__name"]
     list_per_page = 25
     date_hierarchy = "created_at"
     readonly_fields = [
@@ -238,12 +272,12 @@ class IngestionReportAdmin(ModelAdmin):
 
 @admin.register(Conversation)
 class ConversationAdmin(ModelAdmin):
-    list_display = ["id", "owner", "title", "message_count", "created_at", "modified_at"]
+    list_display = ["id", "organization", "title", "message_count", "created_at", "modified_at"]
     list_display_links = ["id", "title"]
-    search_fields = ["title", "owner__username"]
+    search_fields = ["title", "organization__name"]
     list_per_page = 25
     date_hierarchy = "created_at"
-    autocomplete_fields = ["owner"]
+    autocomplete_fields = ["organization"]
     inlines = [MessageInline]
     readonly_fields = ["id", "created_at", "modified_at"]
 

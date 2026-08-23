@@ -176,21 +176,6 @@ Rules:
     ]
 )
 
-INTENT_CLASSIFICATION_PROMPT = ChatPromptTemplate.from_messages(
-    [
-        SystemMessagePromptTemplate.from_template(
-            """You are an intent classifier for a document knowledge-base chat.
-
-Classify the user's message as one of:
-- "small_talk": greetings, small talk, or questions about the assistant itself (e.g., "who are you", "what can you do", "where can you help me", "what is this")
-- "knowledge_query": any question that could be answered by searching the user's documents or knowledge base
-
-Return ONLY the label, nothing else."""
-        ),
-        HumanMessagePromptTemplate.from_template("""Message: {question}"""),
-    ]
-)
-
 SUMMARIZE_PROMPT = ChatPromptTemplate.from_messages(
     [
         SystemMessagePromptTemplate.from_template(

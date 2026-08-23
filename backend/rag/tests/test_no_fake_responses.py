@@ -46,7 +46,9 @@ class TestGenerationFailureIsHonest:
 
         with patch("rag.graph.get_chat_model", return_value=object()), patch(
             "rag.graph.ANSWER_GENERATION_PROMPT"
-        ) as prompt:
+        ) as prompt, patch(
+            "rag.ingest._explain", return_value="The model provider timed out."
+        ):
             prompt.__or__.return_value = chain
             result = asyncio.run(
                 _generate_node({"question": "sell", "documents": list(_Docs()), "history": ""})
@@ -57,6 +59,7 @@ class TestGenerationFailureIsHonest:
         # Must not claim there were no documents.
         assert result["answer_text"] != get_config().errors.no_documents_message
         assert "couldn't find anything" not in result["answer_text"].lower()
+        assert "model provider timed out" in result["answer_text"]
 
 
 class TestPromptForbidsFabrication:

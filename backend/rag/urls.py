@@ -1,7 +1,14 @@
 from django.urls import path
 from rest_framework import routers
 
-from rag.views import AdminDashboardView, AuditLogViewSet, ChatViewSet, DocumentViewSet, EvaluationReportViewSet
+from rag.views import (
+    AdminDashboardView,
+    AuditLogViewSet,
+    ChatViewSet,
+    CorpusReadinessView,
+    DocumentViewSet,
+    EvaluationReportViewSet,
+)
 
 router = routers.DefaultRouter()
 router.register("documents", DocumentViewSet, basename="rag-documents")
@@ -11,5 +18,6 @@ router.register("evaluations", EvaluationReportViewSet, basename="rag-evaluation
 
 urlpatterns = [
     path("admin/dashboard", AdminDashboardView.as_view(), name="admin-dashboard"),
+    path("admin/readiness", CorpusReadinessView.as_view(), name="corpus-readiness"),
     *router.urls,
 ]

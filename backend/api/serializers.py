@@ -5,13 +5,16 @@ from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 from rest_framework import exceptions, serializers
 
+from api.models import Role
+
 User = get_user_model()
 
 
 class UserCurrentSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["username", "first_name", "last_name"]
+        fields = ["username", "first_name", "last_name", "organization", "role"]
+        read_only_fields = ["organization", "role"]
 
 
 class UserCurrentErrorSerializer(serializers.Serializer):
@@ -106,7 +109,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         with transaction.atomic():
-            user = User.objects.create_user(**validated_data)
+            user = User.objects.create_user(role=Role.ADMIN, **validated_data)
 
             # By default newly registered accounts are inactive.
             user.is_active = False

@@ -97,11 +97,27 @@ def get_sparse_embedder():
 
 @lru_cache(maxsize=1)
 def _langfuse_client():
+    """Construct (and cache) the Langfuse client.
+
+    The v3+ SDK is env-var-driven: the global client and its LangChain
+    `CallbackHandler` both resolve credentials from `LANGFUSE_PUBLIC_KEY` /
+    `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL`, not constructor kwargs — the
+    constructor here only accepts `public_key` as an override. Export the
+    settings this app already validated (`LANGFUSE_*` in `.env.backend`) into
+    the process environment so both the client and the callback handler pick
+    them up consistently.
+    """
     settings = get_config().langfuse
     if not settings.enabled:
         return None
     try:
+        import os
+
         from langfuse import Langfuse
+
+        os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.public_key.get_secret_value())
+        os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.secret_key.get_secret_value())
+        os.environ.setdefault("LANGFUSE_BASE_URL", settings.host)
 
         return Langfuse(
             public_key=settings.public_key.get_secret_value(),
@@ -120,23 +136,23 @@ def get_trace_callbacks(
 
     Returns an empty list when Langfuse is not configured, so every call site
     can pass `callbacks=get_trace_callbacks(...)` unconditionally.
+
+    `session_id`/`user_id`/`tags` are accepted for call-site compatibility but
+    not yet attached to the trace: Langfuse's v3 SDK moved this from
+    `CallbackHandler(...)` constructor kwargs to a `propagate_attributes(...)`
+    context manager wrapping the traced call, which none of this module's
+    callers currently use. Traces still ship; they just aren't tagged with
+    session/user/tags until a caller adopts that context manager.
     """
     if _langfuse_client() is None:
         return []
     try:
-        from langfuse.callback import CallbackHandler
+        from langfuse.langchain import CallbackHandler
 
-        settings = get_config().langfuse
-        return [
-            CallbackHandler(
-                public_key=settings.public_key.get_secret_value(),
-                secret_key=settings.secret_key.get_secret_value(),
-                host=settings.host,
-                session_id=session_id,
-                user_id=user_id,
-                tags=tags or [],
-            )
-        ]
+        # Credentials are read from the environment `_langfuse_client()`
+        # exported: the handler's only constructor kwarg (`public_key`) is an
+        # override for routing to a non-default project, not full auth.
+        return [CallbackHandler()]
     except Exception:
         logger.warning("Langfuse callback creation failed.", exc_info=True)
         return []

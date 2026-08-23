@@ -22,13 +22,19 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rag.conf import get_config
 from rag.llm import get_chat_model
 from rag.prompts import SUMMARIZE_PROMPT
+from rag.usage import record_usage_async
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PAGE = "1"
 
 
-async def add_summaries(documents: list[Document], *, callbacks: list | None = None) -> list[Document]:
+async def add_summaries(
+    documents: list[Document],
+    *,
+    callbacks: list | None = None,
+    organization_id: str | None = None,
+) -> list[Document]:
     """Return SUMMARY documents for the given chunks, one per page group.
 
     Never raises: a failed summary degrades retrieval quality but must not fail
@@ -52,7 +58,9 @@ async def add_summaries(documents: list[Document], *, callbacks: list | None = N
     async def summarize(group: list[Document]) -> Document | None:
         async with semaphore:
             try:
-                return await _summarize_group(group, callbacks=callbacks)
+                return await _summarize_group(
+                    group, callbacks=callbacks, organization_id=organization_id
+                )
             except Exception:
                 logger.warning("Summary failed for a page group; skipping.", exc_info=True)
                 return None
@@ -87,9 +95,13 @@ def _group_by_page(documents: list[Document]) -> list[list[Document]]:
     return [groups[key] for key in ordered_keys]
 
 
-async def _summarize_group(group: list[Document], *, callbacks: list | None) -> Document:
+async def _summarize_group(
+    group: list[Document], *, callbacks: list | None, organization_id: str | None
+) -> Document:
     full_content = " ".join(document.page_content for document in group)
-    summary_text = await _summarize_text(full_content, callbacks=callbacks)
+    summary_text = await _summarize_text(
+        full_content, callbacks=callbacks, organization_id=organization_id
+    )
 
     metadata = {
         key: value
@@ -104,7 +116,9 @@ async def _summarize_group(group: list[Document], *, callbacks: list | None) -> 
     return Document(page_content=summary_text, metadata=metadata)
 
 
-async def _summarize_text(text: str, *, callbacks: list | None) -> str:
+async def _summarize_text(
+    text: str, *, callbacks: list | None, organization_id: str | None
+) -> str:
     """Map-reduce summarisation for text longer than the model's comfort zone."""
     settings = get_config().summarizer
     chain = SUMMARIZE_PROMPT | get_chat_model()
@@ -112,6 +126,9 @@ async def _summarize_text(text: str, *, callbacks: list | None) -> str:
 
     if len(text) <= settings.maximum_input_size:
         response = await chain.ainvoke({"text": text}, config=config)
+        await record_usage_async(
+            organization_id=organization_id, operation="ingest", response=response
+        )
         return _as_text(response)
 
     splitter = RecursiveCharacterTextSplitter(
@@ -124,13 +141,20 @@ async def _summarize_text(text: str, *, callbacks: list | None) -> str:
 
     async def summarize_part(part: str) -> str:
         async with semaphore:
-            return _as_text(await chain.ainvoke({"text": part}, config=config))
+            response = await chain.ainvoke({"text": part}, config=config)
+            await record_usage_async(
+                organization_id=organization_id, operation="ingest", response=response
+            )
+            return _as_text(response)
 
     partials = await asyncio.gather(*(summarize_part(part) for part in parts))
     merged = " ".join(partials)
 
     # Reduce step: one more pass so the result reads as a single summary.
     response = await chain.ainvoke({"text": merged[: settings.maximum_input_size]}, config=config)
+    await record_usage_async(
+        organization_id=organization_id, operation="ingest", response=response
+    )
     return _as_text(response)
 
 

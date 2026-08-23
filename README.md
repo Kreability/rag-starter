@@ -17,6 +17,7 @@ No microservices. No vendor lock-in. Works with OpenAI, Azure OpenAI, Ollama, vL
 - [How question answering works](#how-question-answering-works)
 - [Configuration](#configuration)
 - [Security](#security)
+- [Memory sizing](#memory-sizing)
 - [Testing](#testing)
 - [Project structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
@@ -292,6 +293,10 @@ The upstream template ran single-tenant behind basic auth inside a trusted clust
 
 > **Before deploying publicly:** set `DEBUG=0`, use a strong `SECRET_KEY`, restrict `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS`, set `VECTOR_DB_API_KEY` (and uncomment the matching line in `docker-compose.yaml`), replace the default MinIO credentials, set a strong `NEXTAUTH_SECRET`, and leave `DEV_MODE` unset or empty.
 
+### Memory sizing
+
+The `api` and `worker` containers each load their own copy of the embedding and reranking models (~2GB combined per process, cached for the container's lifetime — not a leak). `docker-compose.yaml`'s `mem_limit` values reflect measured steady-state usage with headroom; on a host with less than ~8GB free for Docker, raise Docker's own memory allocation rather than lowering these limits, or a container will be OOM-killed mid-request. `worker` also runs Docling PDF extraction at `--concurrency=1` deliberately — processing two large PDFs at once is what to avoid, not a limit to raise casually.
+
 ---
 
 ## Testing
@@ -354,6 +359,9 @@ Usually a similarity threshold set too high for your embedding model, or an `EMB
 **"Port is already allocated" on startup**
 Something else on your machine holds that port. Every host port is overridable in a root `.env` file: `API_HOST_PORT`, `WEB_HOST_PORT`, `DATABASE_HOST_PORT`, `QDRANT_HOST_PORT`, `MINIO_HOST_PORT`, `OLLAMA_HOST_PORT`. Find the culprit with `lsof -nP -iTCP:8000 -sTCP:LISTEN`. These only affect access from your machine; containers always talk over the internal Docker network.
 
+**A container keeps restarting, or a chat request hangs and then fails**
+Check `docker inspect <container> --format '{{.State.OOMKilled}}'` — if `true`, Docker's memory limit for that service is too low for your host. See [Memory sizing](#memory-sizing).
+
 **Qdrant will not start after changing its image version**
 Qdrant storage is **not forward compatible**. Upgrading across minor versions requires a snapshot restore or a wiped volume (`make clean`). The image and `qdrant-client` are pinned together deliberately — change both at once.
 
@@ -383,7 +391,7 @@ Yes — users register and sign in, and every document has an owner; every vecto
 Add the extension to `ALLOWED_EXTENSIONS` in `backend/rag/security.py` and, if it needs special handling, a branch in `backend/rag/extract.py`.
 
 **Is this production ready?**
-The retrieval pipeline, security controls, and infrastructure are. Per-user authentication is enabled by default. Before going live you still need to harden the deployment settings listed under [Security](#security) and run the production Docker stage (gunicorn, non-root) rather than the development one.
+The retrieval pipeline, security controls, and infrastructure are. Per-user authentication is enabled by default, and the `api` service runs behind gunicorn (see [Memory sizing](#security)) rather than Django's dev server. Before going live you still need to harden the deployment settings listed under [Security](#security).
 
 ---
 

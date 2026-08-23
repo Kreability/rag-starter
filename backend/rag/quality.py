@@ -76,7 +76,9 @@ def score_quality(diagnostics: IngestionDiagnostics) -> str:
     return "GOOD"
 
 
-def build_warnings(diagnostics: IngestionDiagnostics) -> list[str]:
+def build_warnings(
+    diagnostics: IngestionDiagnostics, *, images_captioned: bool | None = None
+) -> list[str]:
     """Build a list of human-readable warnings from diagnostics."""
     warnings: list[str] = []
 
@@ -111,7 +113,7 @@ def build_warnings(diagnostics: IngestionDiagnostics) -> list[str]:
     if diagnostics.text_chunks == 0 and diagnostics.table_chunks == 0 and diagnostics.pages_detected > 0:
         warnings.append("No text or table chunks were produced. Document may be empty or unsupported.")
 
-    if diagnostics.image_chunks > 0 and not diagnostics.ocr_used:
+    if diagnostics.image_chunks > 0 and not diagnostics.ocr_used and images_captioned is not True:
         warnings.append(
             f"{diagnostics.image_chunks} images were extracted but not captioned. Enable image captioning for better retrieval."
         )

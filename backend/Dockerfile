@@ -27,6 +27,17 @@ EXPOSE 8000
 # --- development (default): sources are bind-mounted, uv sync runs at start ---
 FROM base AS development
 
+# --- worker-full: ingestion-only image with Docling/OCR/layout models --------
+FROM base AS worker-full
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ \
+        libglib2.0-0 \
+        libgl1 \
+        libxcb1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+RUN uv sync --frozen --no-dev --extra docling
+
 # --- production: sources baked in, served by gunicorn ------------------------
 FROM base AS production
 

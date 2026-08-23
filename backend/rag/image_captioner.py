@@ -21,10 +21,11 @@ from typing import Any
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from rag.conf import get_config
+from rag import conf
 from rag.metrics import get_metrics
 from rag.resilience import retry
 from rag.storage import upload_fileobj
+from rag.usage import record_usage_async
 
 logger = logging.getLogger(__name__)
 
@@ -56,20 +57,38 @@ Rules:
 )
 
 
+def _captioning_settings():
+    """Resolve captioning settings at call time so the kill switch is authoritative.
+
+    Looking up the function through the config module avoids binding a stale
+    reference during import and lets runtime configuration overrides reach both
+    the batch and single-image entry points.
+    """
+    return conf.get_config().image_captioner
+
+
 def _image_data_url(base64_data: str, mime_type: str = "image/png") -> str:
     return f"data:{mime_type};base64,{base64_data}"
 
 
 @retry(max_attempts=3, base_delay=2.0, retryable=(RuntimeError,))
-async def caption_image(image_data: str, mime_type: str = "image/png") -> str | None:
+async def caption_image(
+    image_data: str,
+    mime_type: str = "image/png",
+    *,
+    organization_id: str | None = None,
+) -> str | None:
     """Return a VLM caption for the given base64 image string, or None on failure."""
-    settings = get_config().image_captioner
+    settings = _captioning_settings()
     if not settings.enabled:
         return None
 
     try:
         chain = CAPTION_PROMPT | _get_vision_model()
         response = await chain.ainvoke({"image_data": image_data})
+        await record_usage_async(
+            organization_id=organization_id, operation="caption", response=response
+        )
         text = getattr(response, "content", response)
         return text.strip() if isinstance(text, str) else str(text).strip()
     except Exception:
@@ -82,6 +101,7 @@ async def caption_images(
     *,
     document_id: str,
     callbacks: list | None = None,
+    organization_id: str | None = None,
 ) -> list[Any]:
     """Caption IMAGE pieces, upload originals to S3, and return updated pieces.
 
@@ -92,7 +112,7 @@ async def caption_images(
     """
     from rag.extract import Piece
 
-    settings = get_config().image_captioner
+    settings = _captioning_settings()
     if not settings.enabled:
         return pieces
 
@@ -105,7 +125,11 @@ async def caption_images(
     async def process(piece: Piece) -> Piece:
         async with semaphore:
             try:
-                caption = await caption_image(piece.content, piece.metadata.get("mime_type", "image/png"))
+                caption_args = (piece.content, piece.metadata.get("mime_type", "image/png"))
+                if organization_id:
+                    caption = await caption_image(*caption_args, organization_id=organization_id)
+                else:
+                    caption = await caption_image(*caption_args)
                 if not caption:
                     return piece
 
@@ -153,8 +177,8 @@ def _upload_image(base64_data: str, *, document_id: str, page: str, mime_type: s
 
 @lru_cache(maxsize=1)
 def _get_vision_model() -> ChatOpenAI:
-    settings = get_config().image_captioner
-    llm_settings = get_config().llm
+    settings = _captioning_settings()
+    llm_settings = conf.get_config().llm
     return ChatOpenAI(
         model=settings.model or llm_settings.model,
         api_key=llm_settings.api_key.get_secret_value() or "not-needed",

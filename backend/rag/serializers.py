@@ -19,6 +19,8 @@ class DocumentSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "name",
+            "uploaded_by",
+            "is_private",
             "source_type",
             "source_uri",
             "status",
@@ -43,6 +45,7 @@ class DocumentUploadSerializer(serializers.Serializer):
     """File upload. Validation lives in `rag.security`."""
 
     file = serializers.FileField(write_only=True)
+    is_private = serializers.BooleanField(required=False, default=False)
 
     def validate_file(self, value):
         try:
@@ -64,6 +67,7 @@ class BulkUploadSerializer(serializers.Serializer):
         allow_empty=False,
     )
     zip_file = serializers.FileField(required=False, allow_empty_file=False)
+    is_private = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         if not attrs.get("files") and not attrs.get("zip_file"):
@@ -83,6 +87,7 @@ class SourceUploadSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=512, required=False, allow_blank=True)
     space_key = serializers.CharField(max_length=255, required=False, allow_blank=True)
     verify_ssl = serializers.BooleanField(required=False, default=True)
+    is_private = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         try:
@@ -166,6 +171,7 @@ class ChatResponseSerializer(serializers.Serializer):
 
     answer = serializers.CharField()
     citations = CitationSerializer(many=True)
+    confidence = serializers.ChoiceField(choices=["high", "medium", "low", "unknown"])
     finish_reason = serializers.CharField(allow_blank=True)
     conversation_id = serializers.UUIDField()
 

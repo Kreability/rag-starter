@@ -6,7 +6,8 @@ name: rag-system
 
 x-backend-env: &backend-env
   env_file:
-    - .env.backend
+    - path: .env.backend
+      required: false
 
 services:
   # --------------------------------------------------------------- data ---
@@ -108,16 +109,23 @@ services:
       context: backend
       target: development
     restart: unless-stopped
-    mem_limit: 1g
+    # 1g measured ~1021MiB in normal use (Django + cached embedder + reranker
+    # weights); 1536m still hit the ceiling and got OOM-killed mid-request
+    # (peaked ~1.19GiB) — confirmed via `docker inspect --format
+    # '{{.State.OOMKilled}}'` reading true after a live chat request. 2g
+    # matches the worker container's limit and leaves real headroom above
+    # the observed peak.
+    mem_limit: 2g
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: >
       bash -c "uv sync &&
                uv run -- python manage.py migrate &&
                uv run -- python manage.py init_rag --wait 60 &&
-               uv run -- python manage.py runserver 0.0.0.0:8000"
+               uv run -- gunicorn api.wsgi:application -c gunicorn.conf.py"
     env_file:
-      - .env.backend
+      - path: .env.backend
+        required: false
       # Also read the frontend's dev credentials so `init_rag` can recreate the
       # account the frontend signs in as. Keeping them in one file avoids the
       # two copies drifting apart. Harmless in production: without DEV_PASSWORD
@@ -157,15 +165,23 @@ services:
   worker:
     build:
       context: backend
-      target: development
+      target: worker-full
     restart: unless-stopped
     mem_limit: 2g
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: >
-      bash -c "uv sync &&
-               uv run -- celery -A api worker --loglevel=INFO --concurrency=2"
+      bash -c "uv sync --frozen --no-dev --extra docling &&
+               uv run -- celery -A api worker --loglevel=INFO --concurrency=1"
+    # concurrency=1, not 2: two simultaneous Docling conversions (each loading
+    # its own full layout/OCR/table-structure model stack) inside this
+    # container's 2 GB limit OOM-killed the worker on a 23 MB PDF — confirmed
+    # via repeated SIGKILL/requeue loop in production logs. One conversion at
+    # a time trades ingestion throughput for not crashing on real documents.
     <<: *backend-env
+    environment:
+      # The worker image contains Docling; keep the API slim and fallback-only.
+      INGESTION_PREFER_DOCLING: "true"
     volumes:
       - ./backend:/app
       # Share only the ML model caches (embedding + rerank weights). Sharing
@@ -222,7 +238,8 @@ services:
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
     env_file:
-      - .env.frontend
+      - path: .env.frontend
+        required: false
     healthcheck:
       # node:*-slim ships neither curl nor wget, so probe with node itself.
       test:
@@ -244,27 +261,156 @@ services:
 
   # ------------------------------------------- observability (optional) ---
   # LLM tracing, prompt versioning, cost tracking, evaluation.
-  langfuse:
-    image: langfuse/langfuse:2
+  #
+  # v4 self-hosted (the `langfuse:2` image's server no longer exists as a
+  # supported target for the langfuse-python v3+ client, which this project's
+  # rag/llm.py uses — v2's server has no OTLP trace-ingestion endpoint).
+  # v4 needs ClickHouse (event storage) and its own Redis (job queue) beyond
+  # what the core stack already runs; `db`'s existing `langfuse` database is
+  # reused for its relational data.
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
     profiles: ["observability"]
     restart: unless-stopped
+    user: "101:101"
+    mem_limit: 1g
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: "${LANGFUSE_CLICKHOUSE_PASSWORD:-change-me-clickhouse}"
+    expose:
+      - "8123"
+      - "9000"
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Dedicated Redis for Langfuse's job queue: the core `redis` service runs
+  # allkeys-lru eviction for Celery's broker, which would silently drop
+  # queued Langfuse jobs under memory pressure. Langfuse requires noeviction.
+  langfuse-redis:
+    image: redis:7-alpine
+    profiles: ["observability"]
+    restart: unless-stopped
+    mem_limit: 256m
+    command: --requirepass ${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis} --maxmemory-policy noeviction
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Object storage for Langfuse's exported events and uploaded media. Separate
+  # from the app's own `minio` service so the two never share a bucket
+  # namespace.
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: ["observability"]
+    restart: unless-stopped
+    mem_limit: 512m
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      MINIO_ROOT_PASSWORD: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    profiles: ["observability"]
+    restart: unless-stopped
+    mem_limit: 1g
+    environment: &langfuse-env
+      NEXTAUTH_URL: "http://localhost:${LANGFUSE_HOST_PORT:-3001}"
+      DATABASE_URL: "postgresql://postgres:${DATABASE_PASSWORD:-change-password}@db:5432/langfuse"
+      SALT: "${LANGFUSE_SALT:-change-me-langfuse-salt}"
+      # No safe default (encrypts stored secrets). Compose only reads
+      # .env.backend for ${VAR} interpolation like this when invoked with
+      # `--env-file .env.backend` — env_file: further down (container-runtime
+      # only) does not cover this substitution. Run this profile as:
+      #   docker compose --env-file .env.backend --profile observability up
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY is required — generate with: openssl rand -hex 32}"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse-clickhouse:9000"
+      CLICKHOUSE_URL: "http://langfuse-clickhouse:8123"
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: "${LANGFUSE_CLICKHOUSE_PASSWORD:-change-me-clickhouse}"
+      # Single-node ClickHouse (no Zookeeper/replication configured here).
+      # Without this explicit false, Langfuse's migrations run
+      # `CREATE TABLE ... ON CLUSTER default`, which fails hard on a bare
+      # single node ("no Zookeeper configuration in server config").
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse-minio:9000"
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "http://langfuse-minio:9000"
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: "${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis}"
+    depends_on: &langfuse-depends-on
+      db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+
+  langfuse:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    profiles: ["observability"]
+    restart: unless-stopped
+    # 1g OOM-killed the Next.js server during first-boot turbopack compilation
+    # (observed: "FATAL ERROR: Reached heap limit ... JavaScript heap out of
+    # memory"). Runtime footprint is ~120MB; the spike is compile-time only.
+    mem_limit: 2g
     ports:
       - "${LANGFUSE_HOST_PORT:-3001}:3000"
     environment:
-      DATABASE_URL: "postgresql://postgres:${DATABASE_PASSWORD:-change-password}@db:5432/langfuse"
-      NEXTAUTH_URL: "http://localhost:3001"
+      <<: *langfuse-env
       NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET:-change-me-langfuse-secret}"
-      SALT: "${LANGFUSE_SALT:-change-me-langfuse-salt}"
-      TELEMETRY_ENABLED: "false"
+      # LANGFUSE_INIT_ORG_ID is the switch: without it, v4 skips the whole
+      # seed step and silently ignores every other LANGFUSE_INIT_* var below
+      # (logged as a warning, easy to miss) — the keys this app is configured
+      # with then belong to no project and every trace export 401s.
       LANGFUSE_INIT_ORG_ID: "${LANGFUSE_INIT_ORG_ID:-}"
+      LANGFUSE_INIT_ORG_NAME: "${LANGFUSE_INIT_ORG_NAME:-}"
       LANGFUSE_INIT_PROJECT_ID: "${LANGFUSE_INIT_PROJECT_ID:-}"
+      LANGFUSE_INIT_PROJECT_NAME: "${LANGFUSE_INIT_PROJECT_NAME:-}"
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
       LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
       LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_INIT_USER_EMAIL:-}"
       LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD:-}"
-    depends_on:
-      db:
-        condition: service_healthy
+    depends_on: *langfuse-depends-on
 
   # --------------------------------------------- local models (optional) ---
   # Run entirely offline: point LLM_BASE_URL/EMBEDDER_BASE_URL at http://ollama:11434/v1
@@ -288,3 +434,6 @@ volumes:
   # Shared so api and worker do not each re-download embedding/rerank models.
   model-cache:
   flashrank-cache:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:

@@ -19,6 +19,7 @@ class Status(models.TextChoices):
 
     UPLOADING = "UPLOADING", _("Uploading")
     PROCESSING = "PROCESSING", _("Processing")
+    ENRICHING = "ENRICHING", _("Enriching")
     READY = "READY", _("Ready")
     ERROR = "ERROR", _("Error")
 
@@ -51,12 +52,21 @@ class Document(models.Model):
     """One ingested source: an uploaded file, a URL, a sitemap or a Confluence space."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    owner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+    organization = models.ForeignKey(
+        "api.Organization",
         on_delete=models.CASCADE,
         related_name="documents",
-        verbose_name=_("owner"),
+        verbose_name=_("organization"),
     )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="uploaded_documents",
+        verbose_name=_("uploaded by"),
+    )
+    is_private = models.BooleanField(_("private"), default=False)
     name = models.CharField(_("name"), max_length=512)
     source_type = models.CharField(
         _("source type"), max_length=16, choices=SourceType.choices, default=SourceType.FILE
@@ -90,18 +100,52 @@ class Document(models.Model):
     created_at = models.DateTimeField(_("created at"), auto_now_add=True)
     modified_at = models.DateTimeField(_("modified at"), auto_now=True)
 
+    def __init__(self, *args, **kwargs):
+        """Accept the pre-tenancy owner argument during the transition.
+
+        This keeps old management scripts and fixtures from silently creating
+        unscoped rows; the legacy user is translated into its organization and
+        retained as ``uploaded_by``.
+        """
+        legacy_owner = kwargs.pop("owner", None)
+        legacy_owner_id = kwargs.pop("owner_id", None)
+        if legacy_owner is not None:
+            kwargs.setdefault("organization", legacy_owner.organization)
+            kwargs.setdefault("uploaded_by", legacy_owner)
+        elif legacy_owner_id is not None:
+            kwargs.setdefault("organization_id", legacy_owner_id)
+            kwargs.setdefault("uploaded_by_id", legacy_owner_id)
+        super().__init__(*args, **kwargs)
+
+    @property
+    def owner(self):
+        """Deprecated alias for the uploader; access control uses organization."""
+        return self.uploaded_by
+
+    @property
+    def owner_id(self):
+        """Deprecated alias retained for old in-memory callers."""
+        return self.uploaded_by_id
+
     class Meta:
         db_table = "rag_documents"
         verbose_name = _("document")
         verbose_name_plural = _("documents")
         ordering = ["-created_at"]
         constraints = [
-            # A user cannot ingest the same source name twice; re-upload replaces.
-            models.UniqueConstraint(fields=["owner", "name"], name="unique_document_per_owner")
+            models.UniqueConstraint(
+                fields=["organization", "name"], name="unique_document_per_org"
+            )
         ]
         indexes = [
-            models.Index(fields=["owner", "status"]),
-            models.Index(fields=["owner", "-created_at"]),
+            models.Index(
+                fields=["organization", "status"],
+                name="rag_documen_organiz_78e6fe_idx",
+            ),
+            models.Index(
+                fields=["organization", "-created_at"],
+                name="rag_documen_organiz_97f6fe_idx",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -189,11 +233,11 @@ class Conversation(models.Model):
     """A chat thread. History is server-side so the client cannot forge context."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    owner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+    organization = models.ForeignKey(
+        "api.Organization",
         on_delete=models.CASCADE,
         related_name="conversations",
-        verbose_name=_("owner"),
+        verbose_name=_("organization"),
     )
     title = models.CharField(_("title"), max_length=255, blank=True, default="")
     created_at = models.DateTimeField(_("created at"), auto_now_add=True)
@@ -204,7 +248,12 @@ class Conversation(models.Model):
         verbose_name = _("conversation")
         verbose_name_plural = _("conversations")
         ordering = ["-modified_at"]
-        indexes = [models.Index(fields=["owner", "-modified_at"])]
+        indexes = [
+            models.Index(
+                fields=["organization", "-modified_at"],
+                name="rag_convers_organiz_765cd4_idx",
+            )
+        ]
 
     def __str__(self) -> str:
         return self.title or str(self.id)
@@ -247,6 +296,14 @@ class AuditLog(models.Model):
         ADMIN_ACTION = "ADMIN_ACTION", _("Admin Action")
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "api.Organization",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+        verbose_name=_("organization"),
+    )
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -307,3 +364,29 @@ class EvaluationReport(models.Model):
 
     def __str__(self) -> str:
         return f"Eval {self.id} · {self.document.name} · Faithfulness={self.faithfulness_score}"
+
+
+class UsageRecord(models.Model):
+    """Provider-reported LLM token usage, scoped to an organization."""
+
+    organization = models.ForeignKey(
+        "api.Organization",
+        on_delete=models.CASCADE,
+        related_name="usage",
+        verbose_name=_("organization"),
+    )
+    operation = models.CharField(_("operation"), max_length=32)
+    model = models.CharField(_("model"), max_length=128)
+    prompt_tokens = models.PositiveIntegerField(_("prompt tokens"), default=0)
+    completion_tokens = models.PositiveIntegerField(_("completion tokens"), default=0)
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True)
+
+    class Meta:
+        db_table = "rag_usage"
+        verbose_name = _("usage record")
+        verbose_name_plural = _("usage records")
+        indexes = [models.Index(fields=["organization", "-created_at"])]
+
+    def __str__(self) -> str:
+        total = self.prompt_tokens + self.completion_tokens
+        return f"{self.organization} · {self.operation} · {self.model} · {total} tokens"

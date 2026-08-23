@@ -42,17 +42,10 @@ class Piece:
 
 
 def extract_file(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnostics]:
-    """Extract content from a local file, walking the fallback chain."""
+    """Extract content from a local file, falling back when output is poor."""
     config = get_config().ingestion
     extension = path.suffix.lower()
     diagnostics = IngestionDiagnostics()
-
-    if config.prefer_docling:
-        pieces, diag = _try_docling(path, name)
-        if pieces:
-            diagnostics = diag
-            diagnostics.extractor_used = "docling"
-            return pieces, diagnostics
 
     if extension in {".txt", ".md"}:
         pieces, diag = _extract_plain_text(path)
@@ -65,20 +58,34 @@ def extract_file(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnosti
         diagnostics.extractor_used = "csv_parser"
         return pieces, diagnostics
 
+    if config.prefer_docling:
+        pieces, diag = _try_docling(path, name)
+        if pieces and not _is_poor_extraction(pieces):
+            diagnostics = diag
+            diagnostics.extractor_used = "docling"
+            return pieces, diagnostics
+        if pieces:
+            logger.info("Docling output unusable for '%s'; trying MarkItDown.", name)
+
     pieces, diag = _try_markitdown(path, name)
-    if pieces:
+    if pieces and not _is_poor_extraction(pieces):
         diagnostics = diag
         diagnostics.extractor_used = "markitdown"
         return pieces, diagnostics
 
     if extension == ".pdf":
         pieces, diag = _try_pypdf(path)
-        if pieces:
+        if pieces and not _is_poor_extraction(pieces):
             diagnostics = diag
             diagnostics.extractor_used = "pypdf"
             return pieces, diagnostics
+        # Preserve the parser's page/readability diagnostics for a poor PDF;
+        # decoding compressed PDF bytes as text creates false READY content.
+        if pieces or diag.pages_detected:
+            diag.extractor_used = "pypdf_poor"
+            return pieces, diag
 
-    logger.warning("All extractors failed for '%s'; falling back to raw decode.", name)
+    logger.warning("All extractors produced poor output for '%s'.", name)
     pieces, diag = _extract_plain_text(path)
     diagnostics = diag
     diagnostics.extractor_used = "plain_text_fallback"
@@ -86,26 +93,36 @@ def extract_file(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnosti
 
 
 def _try_docling(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnostics]:
-    """Docling extraction with table structure and OCR."""
+    """Docling extraction with table structure, page images, and OCR."""
     config = get_config().ingestion
     try:
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions, OcrOptions
-        from docling.document_converter import DocumentConverter, FormatOption
-        from docling_core.types.doc import TableItem, TextItem
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling_core.types.doc import PictureItem, TableItem, TextItem
     except ImportError:
-        logger.debug("Docling not installed; skipping. Install with: uv sync --extra docling")
+        logger.debug("Docling not installed; skipping. Install: uv sync --extra docling")
         return [], IngestionDiagnostics()
 
     try:
         pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_table_structure = True
+        pipeline_options.table_structure_options.do_cell_matching = True
+        # Without this, PictureItem.get_image() returns no rendered image.
+        pipeline_options.generate_picture_images = True
+        pipeline_options.images_scale = 2.0
+        pipeline_options.do_ocr = config.ocr_enabled
         if config.ocr_enabled:
             languages = [lang.strip() for lang in config.ocr_languages.split(",") if lang.strip()]
-            pipeline_options.ocr_options = OcrOptions(lang=languages or ["eng"])
+            language_aliases = {"eng": "en", "deu": "de", "fra": "fr", "spa": "es"}
+            languages = [language_aliases.get(lang, lang) for lang in languages]
+            pipeline_options.ocr_options = RapidOcrOptions(
+                lang=languages or ["en"], backend="onnxruntime"
+            )
 
         converter = DocumentConverter(
             format_options={
-                InputFormat.PDF: FormatOption(pipeline_options=pipeline_options),
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
             }
         )
         result = converter.convert(str(path))
@@ -116,26 +133,32 @@ def _try_docling(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnosti
     pieces: list[Piece] = []
     diagnostics = IngestionDiagnostics()
     seen_pages: set[int] = set()
+    text_pages: set[int] = set()
+    has_unpaged_text = False
 
     for item, _level in result.document.iterate_items():
         page_no = _resolve_page(item)
-        seen_pages.add(page_no)
-        page = str(page_no)
+        if page_no is not None:
+            seen_pages.add(page_no)
+        page = str(page_no) if page_no is not None else ""
 
         if isinstance(item, TableItem):
             try:
-                markdown = item.export_to_markdown()
+                markdown = item.export_to_markdown(doc=result.document)
             except Exception:
                 continue
             if any(character.isalnum() for character in markdown):
                 pieces.append(Piece(content=markdown, content_type="TABLE", page=page))
-        elif hasattr(item, "get_image") or type(item).__name__ == "PictureItem":
+        elif isinstance(item, PictureItem):
             try:
                 image = item.get_image(result.document)
-                data = image.data if hasattr(image, "data") else image
+                if image is None:
+                    continue
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
                 pieces.append(
                     Piece(
-                        content=base64.b64encode(data).decode("utf-8"),
+                        content=base64.b64encode(buffer.getvalue()).decode("utf-8"),
                         content_type="IMAGE",
                         page=page,
                         metadata={"mime_type": "image/png"},
@@ -147,26 +170,27 @@ def _try_docling(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnosti
             text = (item.text or "").strip()
             if text:
                 pieces.append(Piece(content=text, content_type="TEXT", page=page))
+                if page_no is not None:
+                    text_pages.add(page_no)
+                else:
+                    has_unpaged_text = True
 
-    diagnostics.pages_detected = len(seen_pages) if seen_pages else 0
+    diagnostics.pages_detected = len(seen_pages) or (1 if pieces else 0)
+    diagnostics.pages_with_text = len(text_pages)
+    if has_unpaged_text and diagnostics.pages_with_text == 0:
+        diagnostics.pages_with_text = 1
     for piece in pieces:
-        if piece.page and piece.page not in ("-1",):
-            try:
-                page_int = int(piece.page)
-                seen_pages.add(page_int)
-            except ValueError:
-                pass
         if piece.content_type == "TEXT":
             diagnostics.text_chunks += 1
             diagnostics.total_extracted_chars += len(piece.content)
-            if piece.page and piece.page not in ("-1",):
-                diagnostics.pages_with_text += 1
         elif piece.content_type == "TABLE":
             diagnostics.table_chunks += 1
         elif piece.content_type == "IMAGE":
             diagnostics.image_chunks += 1
 
-    diagnostics.pages_without_text = diagnostics.pages_detected - diagnostics.pages_with_text
+    diagnostics.pages_without_text = max(
+        diagnostics.pages_detected - diagnostics.pages_with_text, 0
+    )
     if config.ocr_enabled and diagnostics.pages_without_text > 0 and diagnostics.text_chunks > 0:
         diagnostics.ocr_used = True
         diagnostics.ocr_language = config.ocr_languages
@@ -176,15 +200,26 @@ def _try_docling(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnosti
     return pieces, diagnostics
 
 
-def _resolve_page(item) -> int:
-    """Pull a page number out of Docling provenance; -1 when unknown."""
+def _resolve_page(item) -> int | None:
+    """Pull a positive page number out of Docling provenance when available."""
     provenance = getattr(item, "prov", None)
     if isinstance(provenance, list):
         for entry in provenance:
             page = getattr(entry, "page_no", None)
-            if isinstance(page, int):
+            if isinstance(page, int) and page > 0:
                 return page
-    return -1
+    return None
+
+
+def _is_poor_extraction(pieces: list[Piece]) -> bool:
+    """Return whether extraction produced too little usable text/table data."""
+    threshold = get_config().quality.min_usable_chars
+    usable_chars = sum(
+        len(piece.content)
+        for piece in pieces
+        if piece.content_type in {"TEXT", "TABLE"}
+    )
+    return not pieces or usable_chars < threshold
 
 
 def _try_markitdown(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnostics]:
@@ -208,6 +243,9 @@ def _try_markitdown(path: Path, name: str) -> tuple[list[Piece], IngestionDiagno
     diagnostics = IngestionDiagnostics()
     diagnostics.total_extracted_chars = len(text)
     diagnostics.extractor_used = "markitdown"
+    diagnostics.pages_detected = 1
+    diagnostics.pages_with_text = 1
+    diagnostics.pages_without_text = 0
     for piece in pieces:
         if piece.content_type == "TEXT":
             diagnostics.text_chunks += 1
@@ -327,6 +365,9 @@ def _extract_csv(path: Path) -> tuple[list[Piece], IngestionDiagnostics]:
     content = output.getvalue().strip()
     diagnostics = IngestionDiagnostics()
     diagnostics.pages_detected = 1
+    diagnostics.pages_with_text = 1
+    diagnostics.pages_without_text = 0
+    diagnostics.total_extracted_chars = len(content)
     diagnostics.table_chunks = 1
     diagnostics.extractor_used = "csv_parser"
     return [Piece(content=content, content_type="TABLE")], diagnostics

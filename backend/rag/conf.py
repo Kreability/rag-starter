@@ -230,6 +230,10 @@ class QualitySettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="QUALITY_", case_sensitive=False, extra="ignore")
 
+    # Below this many extracted text/table characters, try the next extractor
+    # instead of accepting a technically non-empty but unusable result.
+    min_usable_chars: int = Field(default=50)
+
     # Text coverage ratios for scoring
     bad_text_coverage_threshold: float = Field(default=0.3)
     warning_text_coverage_threshold: float = Field(default=0.7)

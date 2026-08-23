@@ -26,6 +26,7 @@ def log_action(
     """Write an audit log entry. Fire-and-forget: failures are logged but never raised."""
     try:
         entry = AuditLog(
+            organization=getattr(actor, "organization", None),
             actor=actor,
             action=action,
             resource_type=resource_type,

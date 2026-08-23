@@ -13,6 +13,8 @@ help: ## Show this help
 
 .PHONY: init
 init: ## Create .env files with generated secrets
+	@test -f .env.backend.template || (echo "FATAL: .env.backend.template missing" && exit 1)
+	@test -f .env.frontend.template || (echo "FATAL: .env.frontend.template missing" && exit 1)
 	@test -f .env.backend  || (cp .env.backend.template .env.backend && \
 		python3 -c "import re,pathlib,secrets,base64;p=pathlib.Path('.env.backend');p.write_text(re.sub(r'^SECRET_KEY=$$','SECRET_KEY='+base64.b64encode(secrets.token_bytes(36)).decode(),p.read_text(),flags=re.M))" && \
 		echo "created .env.backend")

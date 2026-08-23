@@ -33,11 +33,11 @@ from langgraph.graph import END, START, StateGraph
 from rag.conf import get_config
 from rag.llm import get_chat_model
 from rag.storage import presigned_url
+from rag.usage import record_usage_async
 from rag.prompts import (
     ANSWER_GENERATION_PROMPT,
     ANSWER_GENERATION_BEGINNER_PROMPT,
     ANSWER_GENERATION_DEEP_DIVE_PROMPT,
-    INTENT_CLASSIFICATION_PROMPT,
     LANGUAGE_DETECTION_PROMPT,
     QUESTION_REPHRASING_PROMPT,
     SMALL_TALK_PROMPT,
@@ -54,7 +54,6 @@ class GraphNodeNames(StrEnum):
     GENERATE = "generate"
     ERROR_NODE = "error_node"
     CONVERSATIONAL = "conversational"
-    CLASSIFY_INTENT = "classify_intent"
 
 
 class AnswerGraphState(TypedDict, total=False):
@@ -62,6 +61,9 @@ class AnswerGraphState(TypedDict, total=False):
     language: str
     rephrased_question: str
     history: str
+    organization_id: str
+    user_id: int
+    is_org_admin: bool
     owner_id: int
     document_id: str | None
     answer_mode: str
@@ -111,6 +113,19 @@ def document_to_citation(document: Document) -> dict:
         "page": metadata.get("page", ""),
         "score": metadata.get("relevance_score", metadata.get("score")),
     }
+
+
+def _confidence(citations: list[dict]) -> str:
+    """Map the strongest citation relevance score to a displayable band."""
+    scores = [citation["score"] for citation in citations if citation.get("score") is not None]
+    if not scores:
+        return "unknown"
+    top = max(scores)
+    if top >= 0.5:
+        return "high"
+    if top >= 0.1:
+        return "medium"
+    return "low"
 
 
 def _citation_url(metadata: dict) -> str:
@@ -173,26 +188,16 @@ def _route_from_start(state: AnswerGraphState) -> str:
     return (
         GraphNodeNames.CONVERSATIONAL
         if is_small_talk(state["question"])
-        else GraphNodeNames.CLASSIFY_INTENT
+        else GraphNodeNames.DETERMINE_LANGUAGE
     )
 
 
-async def _classify_intent_node(state: AnswerGraphState, config=None) -> dict:
-    """LLM-based intent classifier. Runs after the regex gate."""
-    question = state["question"]
-    try:
-        chain = INTENT_CLASSIFICATION_PROMPT | get_chat_model()
-        response = await chain.ainvoke({"question": question}, config=config)
-        intent = getattr(response, "content", str(response)).strip().lower()
-    except Exception:
-        logger.warning("Intent classification failed; assuming knowledge query.", exc_info=True)
-        intent = "knowledge_query"
-
-    if intent == "small_talk":
-        logger.debug("LLM classified '%s' as small talk.", question)
-        return {"answer_text": get_config().small_talk.response, "citations": [], "finish_reason": "small_talk"}
-    logger.debug("LLM classified '%s' as knowledge query.", question)
-    return {"intent": "knowledge_query"}
+async def _record_query_usage(state: AnswerGraphState, response) -> None:
+    await record_usage_async(
+        organization_id=state.get("organization_id"),
+        operation="query",
+        response=response,
+    )
 
 
 # --- nodes ----------------------------------------------------------------
@@ -204,6 +209,7 @@ async def _determine_language_node(state: AnswerGraphState, config=None) -> dict
     try:
         chain = LANGUAGE_DETECTION_PROMPT | get_chat_model()
         response = await chain.ainvoke({"question": question}, config=config)
+        await _record_query_usage(state, response)
         content = getattr(response, "content", str(response))
         language = json.loads(content).get("language", "en")
     except Exception:
@@ -231,6 +237,7 @@ async def _rephrase_node(state: AnswerGraphState, config=None) -> dict:
             },
             config=config,
         )
+        await _record_query_usage(state, response)
         rephrased = getattr(response, "content", response)
         rephrased = rephrased.strip() if isinstance(rephrased, str) else str(rephrased).strip()
     except Exception:
@@ -244,7 +251,12 @@ async def _retrieve_node(state: AnswerGraphState) -> dict:
     query = state.get("rephrased_question") or state["question"]
     try:
         documents = await retrieve(
-            query, owner_id=state["owner_id"], document_id=state.get("document_id")
+            query,
+            organization_id=state.get("organization_id"),
+            user_id=state.get("user_id"),
+            is_org_admin=state.get("is_org_admin", False),
+            owner_id=state.get("owner_id"),
+            document_id=state.get("document_id"),
         )
     except NoOrEmptyCollectionError:
         logger.warning("Query hit an empty collection.")
@@ -281,12 +293,15 @@ async def _generate_node(state: AnswerGraphState, config=None) -> dict:
             },
             config=config,
         )
-    except Exception:
+        await _record_query_usage(state, response)
+    except Exception as exc:
         logger.exception("Answer generation failed.")
         # Retrieval succeeded but the model could not respond. Say so honestly
         # instead of lying that no documents were found.
+        from rag.ingest import _explain
+
         return {
-            "answer_text": errors.generation_failed_message,
+            "answer_text": f"{errors.generation_failed_message}\n\n_{_explain(exc)}_",
             "citations": [document_to_citation(d) for d in state["documents"]],
             "finish_reason": "GenerationError",
         }
@@ -322,6 +337,7 @@ async def _conversational_node(state: AnswerGraphState, config=None) -> dict:
                 {"question": state["question"], "language": state.get("language", "en")},
                 config=config,
             )
+            await _record_query_usage(state, response)
             answer = getattr(response, "content", response)
             answer = answer if isinstance(answer, str) else str(answer)
         except Exception:
@@ -336,18 +352,9 @@ def _docs_retrieved_edge(state: AnswerGraphState) -> str:
     return GraphNodeNames.GENERATE if state.get("documents") else GraphNodeNames.ERROR_NODE
 
 
-def _intent_classified_edge(state: AnswerGraphState) -> str:
-    return (
-        GraphNodeNames.CONVERSATIONAL
-        if state.get("intent") == "small_talk" or state.get("answer_text")
-        else GraphNodeNames.DETERMINE_LANGUAGE
-    )
-
-
 def build_graph():
     graph = StateGraph(AnswerGraphState)
     graph.add_node(GraphNodeNames.CONVERSATIONAL, _conversational_node)
-    graph.add_node(GraphNodeNames.CLASSIFY_INTENT, _classify_intent_node)
     graph.add_node(GraphNodeNames.DETERMINE_LANGUAGE, _determine_language_node)
     graph.add_node(GraphNodeNames.REPHRASE, _rephrase_node)
     graph.add_node(GraphNodeNames.RETRIEVE, _retrieve_node)
@@ -357,11 +364,6 @@ def build_graph():
     graph.add_conditional_edges(
         START,
         _route_from_start,
-        [GraphNodeNames.CONVERSATIONAL, GraphNodeNames.CLASSIFY_INTENT],
-    )
-    graph.add_conditional_edges(
-        GraphNodeNames.CLASSIFY_INTENT,
-        _intent_classified_edge,
         [GraphNodeNames.CONVERSATIONAL, GraphNodeNames.DETERMINE_LANGUAGE],
     )
     graph.add_edge(GraphNodeNames.CONVERSATIONAL, END)
@@ -390,7 +392,10 @@ def get_graph():
 async def answer(
     question: str,
     *,
-    owner_id: int,
+    organization_id: str | None = None,
+    user_id: int | None = None,
+    is_org_admin: bool = False,
+    owner_id: int | None = None,
     history: list[dict] | None = None,
     document_id: str | None = None,
     answer_mode: str = "default",
@@ -399,11 +404,21 @@ async def answer(
     """Run the full graph and return `{answer, citations, finish_reason}`."""
     errors = get_config().errors
     if not question.strip():
-        return {"answer": errors.empty_message, "citations": [], "finish_reason": "empty_message"}
+        return {
+            "answer": errors.empty_message,
+            "citations": [],
+            "confidence": "unknown",
+            "finish_reason": "empty_message",
+        }
 
+    if organization_id is None and owner_id is None:
+        raise ValueError("organization_id is required")
     state: dict[str, Any] = {
         "question": question,
         "history": format_history(history or []),
+        "organization_id": organization_id,
+        "user_id": user_id,
+        "is_org_admin": is_org_admin,
         "owner_id": owner_id,
         "document_id": document_id,
         "answer_mode": answer_mode,
@@ -415,6 +430,7 @@ async def answer(
     return {
         "answer": result.get("answer_text") or errors.no_documents_message,
         "citations": result.get("citations", []),
+        "confidence": _confidence(result.get("citations", [])),
         "finish_reason": result.get("finish_reason", ""),
     }
 
@@ -422,7 +438,10 @@ async def answer(
 async def astream_answer(
     question: str,
     *,
-    owner_id: int,
+    organization_id: str | None = None,
+    user_id: int | None = None,
+    is_org_admin: bool = False,
+    owner_id: int | None = None,
     history: list[dict] | None = None,
     document_id: str | None = None,
     answer_mode: str = "default",
@@ -435,6 +454,8 @@ async def astream_answer(
     then answer tokens stream in.
     """
     errors = get_config().errors
+    if organization_id is None and owner_id is None:
+        raise ValueError("organization_id is required")
     config = {"callbacks": callbacks or []}
 
     if not question.strip():
@@ -442,7 +463,9 @@ async def astream_answer(
         return
 
     if is_small_talk(question):
-        reply = await _conversational_node({"question": question})
+        reply = await _conversational_node(
+            {"question": question, "organization_id": organization_id}
+        )
         yield {"type": "citations", "citations": []}
         yield {"type": "token", "token": reply["answer_text"]}
         yield {"type": "done", "finish_reason": "stop"}
@@ -451,10 +474,20 @@ async def astream_answer(
     formatted_history = format_history(history or [])
 
     try:
-        language = (await _determine_language_node({"question": question}, config))["language"]
+        language = (
+            await _determine_language_node(
+                {"question": question, "organization_id": organization_id}, config
+            )
+        )["language"]
         rephrased = (
             await _rephrase_node(
-                {"question": question, "history": formatted_history, "language": language}, config
+                {
+                    "question": question,
+                    "history": formatted_history,
+                    "language": language,
+                    "organization_id": organization_id,
+                },
+                config,
             )
         )["rephrased_question"]
 
@@ -462,6 +495,9 @@ async def astream_answer(
             {
                 "question": question,
                 "rephrased_question": rephrased,
+                "organization_id": organization_id,
+                "user_id": user_id,
+                "is_org_admin": is_org_admin,
                 "owner_id": owner_id,
                 "document_id": document_id,
             }
@@ -488,8 +524,10 @@ async def astream_answer(
         "context": build_context(documents),
         "language": language,
     }
+    last_chunk = None
     try:
         async for chunk in chain.astream(payload, config=config):
+            last_chunk = chunk
             token = getattr(chunk, "content", "")
             if token:
                 yield {"type": "token", "token": token}
@@ -498,4 +536,5 @@ async def astream_answer(
         yield {"type": "error", "message": errors.generation_failed_message}
         return
 
+    await _record_query_usage({"organization_id": organization_id}, last_chunk)
     yield {"type": "done", "finish_reason": "stop"}

@@ -39,6 +39,7 @@ pytestmark = pytest.mark.skipif(
 
 
 from langchain_core.embeddings import Embeddings  # noqa: E402
+from qdrant_client.http import models  # noqa: E402
 
 
 class FakeEmbeddings(Embeddings):
@@ -205,12 +206,21 @@ class TestVectorRoundTrip:
         vectordb.upload([document])
         vectordb.upload([document])
 
-        count = (
-            vectordb.get_client()
-            .get_collection(isolated_collection)
-            .points_count
+        points, _ = vectordb.get_client().scroll(
+            collection_name=isolated_collection,
+            scroll_filter=models.Filter(
+                must_not=[
+                    models.FieldCondition(
+                        key="metadata.id",
+                        match=models.MatchValue(value="__rag_system_embedder__"),
+                    )
+                ]
+            ),
+            limit=10,
+            with_payload=False,
+            with_vectors=False,
         )
-        assert count == 1, f"expected 1 point after re-upload, found {count}"
+        assert len(points) == 1, f"expected 1 user point after re-upload, found {len(points)}"
 
 
 class TestExtraction:
@@ -220,7 +230,7 @@ class TestExtraction:
         path = tmp_path / "data.csv"
         path.write_text("name,role\nAda,engineer\nGrace,admiral\n")
 
-        pieces = extract_file(path, "data.csv")
+        pieces, _diagnostics = extract_file(path, "data.csv")
         assert pieces
         assert pieces[0].content_type == "TABLE"
         assert "| name | role |" in pieces[0].content
@@ -232,7 +242,7 @@ class TestExtraction:
         path = tmp_path / "notes.txt"
         path.write_text("Retrieval augmented generation grounds answers in sources.")
 
-        pieces = extract_file(path, "notes.txt")
+        pieces, _diagnostics = extract_file(path, "notes.txt")
         assert len(pieces) == 1
         assert "Retrieval augmented" in pieces[0].content
 
@@ -373,12 +383,15 @@ class TestExtraction:
                 metadata={"mime_type": "image/png"},
             )
         ]
-        with patch("rag.conf.get_config") as mock_config:
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
+            "rag.image_captioner.caption_image", side_effect=AssertionError("captioning disabled")
+        ) as mock_caption:
             mock_config.return_value.image_captioner.enabled = False
             result = asyncio.run(caption_images(pieces, document_id="doc-1"))
 
         assert result[0].content == "ZmFrZSBpbWFnZSBkYXRh"
         assert result[0].content_type == "IMAGE"
+        mock_caption.assert_not_called()
 
     def test_image_captioning_replaces_content_with_caption(self):
         from rag.extract import Piece
@@ -392,7 +405,7 @@ class TestExtraction:
                 metadata={"mime_type": "image/png"},
             )
         ]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", return_value="A red bar chart showing Q3 revenue."
         ) as mock_caption, patch(
             "rag.image_captioner._upload_image", return_value="images/doc-1/page-1.png"
@@ -419,7 +432,7 @@ class TestExtraction:
                 metadata={"mime_type": "image/png"},
             )
         ]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", return_value=None
         ) as mock_caption:
             mock_config.return_value.image_captioner.enabled = True

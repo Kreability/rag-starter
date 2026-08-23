@@ -26,16 +26,16 @@ class Command(BaseCommand):
             help="Skip the confirmation prompt.",
         )
         parser.add_argument(
-            "--user",
-            type=int,
+            "--organization",
+            type=str,
             default=None,
-            metavar="USER_ID",
-            help="Restrict the wipe to a single user ID (default: all users).",
+            metavar="ORG_UUID",
+            help="Restrict the wipe to a single organization (default: all organizations).",
         )
 
     def handle(self, *args, **options):
-        user_id = options["user"]
-        scope = f"user {user_id}" if user_id else "ALL users"
+        organization_id = options["organization"]
+        scope = f"organization {organization_id}" if organization_id else "ALL organizations"
 
         if not options["yes"]:
             self.stdout.write(
@@ -51,10 +51,11 @@ class Command(BaseCommand):
 
         counts = {"documents": 0, "vectors": 0, "files": 0, "conversations": 0}
 
-        counts["documents"] = self._delete_postgres(user_id)
-        counts["vectors"] = self._delete_vectors(user_id)
-        counts["files"] = self._delete_files(user_id)
-        counts["conversations"] = self._delete_conversations(user_id)
+        # Capture organization-scoped object keys before deleting their rows.
+        counts["files"] = self._delete_files(organization_id)
+        counts["documents"] = self._delete_postgres(organization_id)
+        counts["vectors"] = self._delete_vectors(organization_id)
+        counts["conversations"] = self._delete_conversations(organization_id)
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -70,12 +71,12 @@ class Command(BaseCommand):
     # Postgres
     # ------------------------------------------------------------------
 
-    def _delete_postgres(self, user_id: int | None) -> int:
+    def _delete_postgres(self, organization_id: str | None) -> int:
         from rag.models import Document
 
         qs = Document.objects.all()
-        if user_id is not None:
-            qs = qs.filter(owner_id=user_id)
+        if organization_id is not None:
+            qs = qs.filter(organization_id=organization_id)
 
         count = qs.count()
         # Chunks, IngestionReport, EvaluationReport are CASCADE-deleted with the Document.
@@ -83,12 +84,12 @@ class Command(BaseCommand):
         self.stdout.write(f"  Deleted {count} document row(s) from Postgres.")
         return count
 
-    def _delete_conversations(self, user_id: int | None) -> int:
+    def _delete_conversations(self, organization_id: str | None) -> int:
         from rag.models import Conversation
 
         qs = Conversation.objects.all()
-        if user_id is not None:
-            qs = qs.filter(owner_id=user_id)
+        if organization_id is not None:
+            qs = qs.filter(organization_id=organization_id)
 
         count = qs.count()
         # Messages are CASCADE-deleted with the Conversation.
@@ -100,7 +101,7 @@ class Command(BaseCommand):
     # Qdrant
     # ------------------------------------------------------------------
 
-    def _delete_vectors(self, user_id: int | None) -> int:
+    def _delete_vectors(self, organization_id: str | None) -> int:
         from qdrant_client.http import models as qmodels
 
         from rag.vectordb import get_client, get_config
@@ -112,12 +113,12 @@ class Command(BaseCommand):
             self.stdout.write("  Qdrant collection does not exist; skipping.")
             return 0
 
-        if user_id is not None:
+        if organization_id is not None:
             qdrant_filter = qmodels.Filter(
                 must=[
                     qmodels.FieldCondition(
-                        key="metadata.owner_id",
-                        match=qmodels.MatchValue(value=str(user_id)),
+                        key="metadata.organization_id",
+                        match=qmodels.MatchValue(value=str(organization_id)),
                     )
                 ]
             )
@@ -150,15 +151,11 @@ class Command(BaseCommand):
     # Object storage
     # ------------------------------------------------------------------
 
-    def _delete_files(self, user_id: int | None) -> int:
+    def _delete_files(self, organization_id: str | None) -> int:
         """Remove files from S3 / MinIO.
 
-        If wiping all users we delete every object in the bucket (list + bulk
-        delete). For a single user we rely on the Document.storage_key values
-        already removed from Postgres, so we re-query them before the Postgres
-        delete — but since this method is called after _delete_postgres the
-        keys are no longer in the DB. Instead, list objects by the user-prefixed
-        key pattern (keys are stored as ``<user_id>/<filename>``).
+        If wiping all organizations, delete every object. For one organization,
+        delete only the storage keys attached to that organization's documents.
         """
         import boto3.exceptions
         from botocore.exceptions import ClientError
@@ -176,13 +173,23 @@ class Command(BaseCommand):
             self.stdout.write("  Object storage bucket not found; skipping.")
             return 0
 
-        prefix = f"{user_id}/" if user_id is not None else ""
-        paginator = client.get_paginator("list_objects_v2")
-        keys = []
+        if organization_id is not None:
+            from rag.models import Document
 
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                keys.append({"Key": obj["Key"]})
+            keys = [
+                {"Key": key}
+                for key in Document.objects.filter(
+                    organization_id=organization_id
+                )
+                .exclude(storage_key="")
+                .values_list("storage_key", flat=True)
+            ]
+        else:
+            paginator = client.get_paginator("list_objects_v2")
+            keys = []
+            for page in paginator.paginate(Bucket=bucket):
+                for obj in page.get("Contents", []):
+                    keys.append({"Key": obj["Key"]})
 
         if not keys:
             self.stdout.write("  No files found in object storage.")

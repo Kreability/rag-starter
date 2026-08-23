@@ -15,8 +15,11 @@ import uuid
 import zipfile
 
 from asgiref.sync import async_to_sync
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.http import StreamingHttpResponse
+from django.core.files.uploadedfile import SimpleUploadedFile
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -27,13 +30,15 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from api.permissions import IsOrgAdmin
 from rag import storage
-from rag.audit import log_action, log_query
+from rag.audit import log_action, log_document_delete, log_document_reindex, log_query
 from rag.graph import answer as run_answer
 from rag.graph import astream_answer
 from rag.ingest import delete_document
 from rag.llm import get_trace_callbacks
 from rag.models import AuditLog, Chunk, Conversation, Document, EvaluationReport, IngestionReport, Message, SourceType, Status
+from rag.security import validate_upload
 from rag.serializers import (
     AuditLogSerializer,
     BulkUploadSerializer,
@@ -53,6 +58,16 @@ from rag.tasks import ingest_document_task
 logger = logging.getLogger(__name__)
 
 
+def visible_documents(user):
+    """Return documents the caller may read within their organization."""
+    if not getattr(user, "organization_id", None):
+        return Document.objects.none()
+    queryset = Document.objects.filter(organization_id=user.organization_id)
+    if getattr(user, "is_org_admin", False):
+        return queryset
+    return queryset.filter(Q(is_private=False) | Q(uploaded_by=user)).distinct()
+
+
 class DocumentViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -69,8 +84,7 @@ class DocumentViewSet(
     throttle_scope = "documents"
 
     def get_queryset(self):
-        # Tenant isolation: a user only ever sees their own documents.
-        return Document.objects.filter(owner=self.request.user)
+        return visible_documents(self.request.user)
 
     @extend_schema(
         request=DocumentUploadSerializer,
@@ -82,6 +96,7 @@ class DocumentViewSet(
         serializer = DocumentUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         uploaded = serializer.validated_data["file"]
+        organization = request.user.organization
 
         name = uploaded.sanitized_name
         content_type = uploaded.resolved_content_type
@@ -98,9 +113,11 @@ class DocumentViewSet(
             )
 
         document, created = Document.objects.update_or_create(
-            owner=request.user,
+            organization=organization,
             name=name,
             defaults={
+                "uploaded_by": request.user,
+                "is_private": serializer.validated_data.get("is_private", False),
                 "source_type": SourceType.FILE,
                 "status": Status.PROCESSING,
                 "storage_key": storage_key,
@@ -126,6 +143,7 @@ class DocumentViewSet(
         serializer = BulkUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        organization = request.user.organization
 
         files_to_upload: list[tuple[str, io.BytesIO, str]] = []
 
@@ -140,8 +158,19 @@ class DocumentViewSet(
                         if not name or name.endswith("/"):
                             continue
                         content = zf.read(info)
-                        content_type = getattr(info, "content_type", None) or "application/octet-stream"
-                        files_to_upload.append((name, io.BytesIO(content), content_type))
+                        candidate = SimpleUploadedFile(
+                            name,
+                            content,
+                            content_type="application/octet-stream",
+                        )
+                        try:
+                            safe_name, content_type = validate_upload(candidate)
+                        except DjangoValidationError as exc:
+                            return Response(
+                                {"detail": exc.messages},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                        files_to_upload.append((safe_name, io.BytesIO(content), content_type))
             except zipfile.BadZipFile:
                 return Response(
                     {"detail": "Invalid ZIP file."},
@@ -176,9 +205,11 @@ class DocumentViewSet(
                 continue
 
             document, _ = Document.objects.update_or_create(
-                owner=request.user,
+                organization=organization,
                 name=name,
                 defaults={
+                    "uploaded_by": request.user,
+                    "is_private": data.get("is_private", False),
                     "source_type": SourceType.FILE,
                     "status": Status.PROCESSING,
                     "storage_key": storage_key,
@@ -206,11 +237,14 @@ class DocumentViewSet(
         serializer = SourceUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        organization = request.user.organization
 
         document, created = Document.objects.update_or_create(
-            owner=request.user,
+            organization=organization,
             name=data["name"],
             defaults={
+                "uploaded_by": request.user,
+                "is_private": data.get("is_private", False),
                 "source_type": data["source_type"],
                 "source_uri": data["source_uri"],
                 "status": Status.PROCESSING,
@@ -288,6 +322,14 @@ class DocumentViewSet(
         )
 
     @staticmethod
+    def _get_client_ip(request) -> str | None:
+        """Extract client IP from request, handling proxies."""
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR")
+
+    @staticmethod
     def _queue(document: Document) -> None:
         """Dispatch ingestion after the transaction commits.
 
@@ -318,7 +360,11 @@ class ChatViewSet(viewsets.GenericViewSet):
     throttle_scope = "chat"
 
     def get_queryset(self):
-        return Conversation.objects.filter(owner=self.request.user)
+        if not getattr(self.request.user, "organization_id", None):
+            return Conversation.objects.none()
+        return Conversation.objects.filter(
+            organization_id=self.request.user.organization_id
+        )
 
     @extend_schema(
         request=ChatRequestSerializer,
@@ -358,7 +404,9 @@ class ChatViewSet(viewsets.GenericViewSet):
 
         result = async_to_sync(run_answer)(
             data["message"],
-            owner_id=request.user.pk,
+            organization_id=str(request.user.organization_id),
+            user_id=request.user.pk,
+            is_org_admin=request.user.is_org_admin,
             history=history,
             document_id=document_id,
             answer_mode=data.get("answer_mode", "default"),
@@ -385,7 +433,9 @@ class ChatViewSet(viewsets.GenericViewSet):
             async def produce():
                 async for event in astream_answer(
                     message,
-                    owner_id=request.user.pk,
+                    organization_id=str(request.user.organization_id),
+                    user_id=request.user.pk,
+                    is_org_admin=request.user.is_org_admin,
                     history=history,
                     document_id=document_id,
                     answer_mode=answer_mode,
@@ -469,18 +519,19 @@ class ChatViewSet(viewsets.GenericViewSet):
     def _get_conversation(self, request, conversation_id) -> Conversation:
         if conversation_id:
             conversation = Conversation.objects.filter(
-                pk=conversation_id, owner=request.user
+                pk=conversation_id,
+                organization_id=request.user.organization_id,
             ).first()
             if conversation is None:
                 # Do not leak whether the id exists for another user.
                 raise ValidationError({"conversation_id": "Unknown conversation."})
             return conversation
-        return Conversation.objects.create(owner=request.user)
+        return Conversation.objects.create(organization_id=request.user.organization_id)
 
     def _validate_document(self, request, document_id) -> str | None:
         if not document_id:
             return None
-        exists = Document.objects.filter(pk=document_id, owner=request.user).exists()
+        exists = self.get_queryset().filter(pk=document_id).exists()
         if not exists:
             raise ValidationError({"document_id": "Unknown document."})
         return str(document_id)
@@ -501,7 +552,7 @@ class ChatViewSet(viewsets.GenericViewSet):
 class AdminDashboardView(APIView):
     """Aggregated ingestion quality dashboard for admins."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOrgAdmin]
 
     @extend_schema(
         responses={
@@ -526,8 +577,7 @@ class AdminDashboardView(APIView):
         description="Admin dashboard with ingestion quality summary.",
     )
     def get(self, request):
-        user = request.user
-        documents = Document.objects.filter(owner=user)
+        documents = Document.objects.filter(organization_id=request.user.organization_id)
 
         total = documents.count()
         quality_dist = {"GOOD": 0, "WARNING": 0, "BAD": 0}
@@ -559,17 +609,84 @@ class AdminDashboardView(APIView):
         })
 
 
+class CorpusReadinessView(APIView):
+    """Tell an organization exactly which sources are queryable and why."""
+
+    permission_classes = [IsOrgAdmin]
+
+    @extend_schema(
+        responses={200: OpenApiResponse(description="Organization corpus readiness report.")},
+        description="Report indexed documents, failed ingestions, and warnings.",
+    )
+    def get(self, request):
+        documents = Document.objects.filter(
+            organization_id=request.user.organization_id
+        ).select_related("last_ingestion_report")
+        total = documents.count()
+        ready_documents = list(documents.filter(status=Status.READY))
+        queryable_documents = list(
+            documents.filter(status__in=[Status.ENRICHING, Status.READY])
+        )
+
+        failed = [
+            {
+                "id": str(document.id),
+                "name": document.name,
+                "reason": document.error_message or "Unknown ingestion error.",
+                "quality": (
+                    document.last_ingestion_report.quality_score
+                    if document.last_ingestion_report
+                    else None
+                ),
+            }
+            for document in documents.filter(status=Status.ERROR)
+        ]
+        needs_attention = [
+            {
+                "id": str(document.id),
+                "name": document.name,
+                "warnings": document.last_ingestion_report.warnings,
+            }
+            for document in queryable_documents
+            if document.last_ingestion_report
+            and document.last_ingestion_report.warnings
+        ]
+        ready_needs_attention = [
+            document
+            for document in ready_documents
+            if document.last_ingestion_report and document.last_ingestion_report.warnings
+        ]
+
+        return Response(
+            {
+                "total_documents": total,
+                "queryable_documents": len(queryable_documents),
+                "enriching_documents": sum(
+                    1 for document in queryable_documents if document.status == Status.ENRICHING
+                ),
+                "fully_indexed": len(ready_documents) - len(ready_needs_attention),
+                "indexed_with_warnings": len(needs_attention),
+                "failed": failed,
+                "needs_attention": needs_attention,
+                "readiness_percent": round(100 * len(ready_documents) / total, 1)
+                if total
+                else 0.0,
+            }
+        )
+
+
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only audit log for compliance queries."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOrgAdmin]
     serializer_class = AuditLogSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "audit"
 
     def get_queryset(self):
-        user = self.request.user
-        return AuditLog.objects.filter(actor=user).order_by("-created_at")
+        return AuditLog.objects.filter(
+            organization_id=self.request.user.organization_id
+        ).order_by("-created_at")
 
 
 class EvaluationReportViewSet(viewsets.ReadOnlyModelViewSet):
@@ -581,5 +698,6 @@ class EvaluationReportViewSet(viewsets.ReadOnlyModelViewSet):
     throttle_scope = "evaluation"
 
     def get_queryset(self):
-        user = self.request.user
-        return EvaluationReport.objects.filter(document__owner=user).order_by("-created_at")
+        return EvaluationReport.objects.filter(
+            document__in=visible_documents(self.request.user)
+        ).order_by("-created_at")

@@ -24,6 +24,8 @@ import logging
 from langchain_core.documents import Document
 
 from rag.conf import get_config
+from qdrant_client.http import models
+
 from rag.vectordb import asearch, collection_available, get_documents_by_ids
 
 logger = logging.getLogger(__name__)
@@ -44,23 +46,55 @@ def _quarks() -> list[dict]:
     ]
 
 
-async def retrieve(query: str, *, owner_id: int, document_id: str | None = None) -> list[Document]:
-    """Retrieve the most relevant chunks for a query, scoped to one owner."""
+async def retrieve(
+    query: str,
+    *,
+    organization_id: str | None = None,
+    user_id: int | None = None,
+    is_org_admin: bool = False,
+    document_id: str | None = None,
+    owner_id: int | None = None,
+) -> list[Document]:
+    """Retrieve chunks scoped to an organization and document visibility."""
     if not collection_available():
         raise NoOrEmptyCollectionError()
 
-    base_filter = {"owner_id": owner_id}
+    if organization_id is None:
+        if owner_id is None:
+            raise ValueError("organization_id is required")
+        base_filter = {"owner_id": owner_id}
+        visibility_filter = None
+    else:
+        base_filter = {"organization_id": str(organization_id)}
+        visibility_filter = None
+        if not is_org_admin:
+            if user_id is None:
+                raise ValueError("user_id is required for non-admin retrieval")
+            visibility_filter = models.Filter(
+                should=[
+                    models.FieldCondition(
+                        key="metadata.is_private",
+                        match=models.MatchValue(value=False),
+                    ),
+                    models.FieldCondition(
+                        key="metadata.uploaded_by_id",
+                        match=models.MatchValue(value=user_id),
+                    ),
+                ]
+            )
     if document_id:
         base_filter["document_id"] = document_id
 
     async def search(quark: dict) -> list[Document]:
         try:
-            return await asearch(
-                query,
-                k=quark["k"],
-                score_threshold=quark["threshold"],
-                filter_kwargs={**base_filter, "type": quark["type"]},
-            )
+            search_kwargs = {
+                "k": quark["k"],
+                "score_threshold": quark["threshold"],
+                "filter_kwargs": {**base_filter, "type": quark["type"]},
+            }
+            if visibility_filter is not None:
+                search_kwargs["extra_must"] = [visibility_filter]
+            return await asearch(query, **search_kwargs)
         except Exception:
             # One failing content type must not sink the whole query.
             logger.warning("Retriever quark '%s' failed.", quark["type"], exc_info=True)

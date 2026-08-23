@@ -29,7 +29,10 @@ dependencies = [
     "fastembed>=0.5",
     "openai>=1.59",
     "tiktoken>=0.8",
-    "langfuse>=2.57,<3",
+    # 2.x's LangChain callback handler imports langchain.callbacks.base, a path
+    # removed in LangChain 1.x (this project's version). 3.x+ branches on
+    # langchain.__version__ and imports from langchain_core instead.
+    "langfuse>=3",
     "langdetect>=1.0.9",
     "pydantic-settings>=2.7",
     # --- ingestion ---
@@ -48,6 +51,10 @@ dependencies = [
 docling = [
     "docling>=2.15",
     "docling-core>=2.12",
+    # Declare these directly so uv applies the explicit CPU index to Docling's
+    # transitive model dependencies as well.
+    "torch>=2.13,<2.14",
+    "torchvision>=0.28,<0.29",
 ]
 # Confluence source ingestion
 confluence = [
@@ -91,4 +98,18 @@ ignore = [
 [tool.pytest.ini_options]
 filterwarnings = "ignore"
 addopts = "--strict-config --strict-markers --ds=api.settings"
+markers = [
+    "golden: live answer-quality checks; run with RUN_GOLDEN=1",
+]
 asyncio_mode = "auto"
+
+# Docling's standard extra depends on PyTorch. Keep the ingestion worker CPU
+# only; the API and local Docker host do not need CUDA runtime packages.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]

@@ -9,6 +9,7 @@ validated here.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 from urllib.parse import urlparse
@@ -17,6 +18,8 @@ from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 
 from rag.conf import get_config
+
+logger = logging.getLogger(__name__)
 
 # Extension -> MIME allowlist. Anything not listed is rejected outright.
 ALLOWED_EXTENSIONS: dict[str, tuple[str, ...]] = {
@@ -92,7 +95,35 @@ def validate_upload(uploaded_file) -> tuple[str, str]:
             _("File content (%(sniffed)s) does not match extension '%(ext)s'.")
             % {"sniffed": sniffed, "ext": extension}
         )
+    if extension == ".pdf":
+        validate_pdf_readable(uploaded_file)
     return name, resolved
+
+
+def validate_pdf_readable(uploaded_file) -> None:
+    """Reject encrypted or structurally empty PDFs before they reach Celery."""
+    try:
+        from pypdf import PdfReader
+
+        uploaded_file.seek(0)
+        reader = PdfReader(uploaded_file)
+        if reader.is_encrypted:
+            raise ValidationError(
+                _("This PDF is password-protected. Remove the password and re-upload.")
+            )
+        if len(reader.pages) == 0:
+            raise ValidationError(_("This PDF has no pages."))
+    except ValidationError:
+        raise
+    except Exception:
+        # A malformed PDF is still allowed to reach extraction, which can
+        # provide the durable document-level error and retry path.
+        logger.debug("Pre-flight PDF check inconclusive.", exc_info=True)
+    finally:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
 
 
 def _sniff_mime(uploaded_file) -> str:

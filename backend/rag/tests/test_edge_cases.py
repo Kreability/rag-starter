@@ -197,21 +197,21 @@ class TestChunkingQuality:
 class TestImageCaptioningEdgeCases:
     def test_disabled_returns_unchanged(self):
         pieces = [Piece(content="img", content_type="IMAGE", page="1")]
-        with patch("rag.conf.get_config") as mock_config:
+        with patch("rag.image_captioner.conf.get_config") as mock_config:
             mock_config.return_value.image_captioner.enabled = False
             result = asyncio.run(caption_images(pieces, document_id="d1"))
         assert result == pieces
 
     def test_no_images_returns_unchanged(self):
         pieces = [Piece(content="text", content_type="TEXT", page="1")]
-        with patch("rag.conf.get_config") as mock_config:
+        with patch("rag.image_captioner.conf.get_config") as mock_config:
             mock_config.return_value.image_captioner.enabled = True
             result = asyncio.run(caption_images(pieces, document_id="d1"))
         assert result == pieces
 
     def test_caption_failure_preserves_original(self):
         pieces = [Piece(content="bad_image_data", content_type="IMAGE", page="1")]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", return_value=None
         ):
             mock_config.return_value.image_captioner.enabled = True
@@ -221,7 +221,7 @@ class TestImageCaptioningEdgeCases:
 
     def test_upload_failure_keeps_caption(self):
         pieces = [Piece(content="img_data", content_type="IMAGE", page="1")]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", return_value="A chart."
         ), patch(
             "rag.image_captioner._upload_image", side_effect=RuntimeError("S3 down")
@@ -233,14 +233,14 @@ class TestImageCaptioningEdgeCases:
         assert result[0].metadata["storage_key"] == ""
 
     def test_caption_image_disabled_returns_none(self):
-        with patch("rag.conf.get_config") as mock_config:
+        with patch("rag.image_captioner.conf.get_config") as mock_config:
             mock_config.return_value.image_captioner.enabled = False
             result = asyncio.run(caption_image("img_data"))
         assert result is None
 
     def test_caption_image_success_through_pipeline(self):
         pieces = [Piece(content="img_data", content_type="IMAGE", page="1")]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", return_value="A bar chart."
         ), patch("rag.image_captioner._upload_image", return_value="images/d1/page-1.png"):
             mock_config.return_value.image_captioner.enabled = True
@@ -251,7 +251,7 @@ class TestImageCaptioningEdgeCases:
 
     def test_caption_image_failure_through_pipeline(self):
         pieces = [Piece(content="img_data", content_type="IMAGE", page="1")]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", return_value=None
         ):
             mock_config.return_value.image_captioner.enabled = True
@@ -261,7 +261,7 @@ class TestImageCaptioningEdgeCases:
 
     def test_concurrency_limit_respected(self):
         pieces = [Piece(content=f"img_{i}", content_type="IMAGE", page="1") for i in range(10)]
-        with patch("rag.conf.get_config") as mock_config, patch(
+        with patch("rag.image_captioner.conf.get_config") as mock_config, patch(
             "rag.image_captioner.caption_image", side_effect=lambda data, mime_type="image/png", **kw: f"caption_{data}"
         ), patch("rag.image_captioner._upload_image", return_value="key"):
             mock_config.return_value.image_captioner.enabled = True

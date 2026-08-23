@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -73,6 +74,22 @@ class TestValidateUpload:
         upload.name = "../../etc/shadow.txt"
         name, _ = validate_upload(upload)
         assert name == "shadow.txt"
+
+    def test_rejects_encrypted_pdf_before_queueing(self):
+        upload = SimpleUploadedFile("locked.pdf", b"%PDF-1.4", content_type="application/pdf")
+        with patch("rag.security._sniff_mime", return_value="application/pdf"), patch(
+            "pypdf.PdfReader",
+            return_value=SimpleNamespace(is_encrypted=True, pages=[]),
+        ), pytest.raises(ValidationError, match="password-protected"):
+            validate_upload(upload)
+
+    def test_rejects_zero_page_pdf_before_queueing(self):
+        upload = SimpleUploadedFile("empty.pdf", b"%PDF-1.4", content_type="application/pdf")
+        with patch("rag.security._sniff_mime", return_value="application/pdf"), patch(
+            "pypdf.PdfReader",
+            return_value=SimpleNamespace(is_encrypted=False, pages=[]),
+        ), pytest.raises(ValidationError, match="no pages"):
+            validate_upload(upload)
 
 
 class TestSSRFGuard:

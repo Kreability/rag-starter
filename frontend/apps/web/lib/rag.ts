@@ -8,7 +8,7 @@
 
 import { clearToken, DEV_MODE, getApiToken } from './token'
 
-export type DocumentStatus = 'UPLOADING' | 'PROCESSING' | 'READY' | 'ERROR'
+export type DocumentStatus = 'UPLOADING' | 'PROCESSING' | 'ENRICHING' | 'READY' | 'ERROR'
 export type SourceType = 'FILE' | 'URL' | 'SITEMAP' | 'CONFLUENCE'
 
 export type RagDocument = {
