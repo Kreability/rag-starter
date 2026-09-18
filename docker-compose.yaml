@@ -83,7 +83,7 @@ services:
 
   # S3-compatible object storage for the original files behind every citation.
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     restart: unless-stopped
     mem_limit: 512m
     command: server /data --console-address ":9001"
@@ -120,6 +120,7 @@ services:
       - "host.docker.internal:host-gateway"
     command: >
       bash -c "uv sync &&
+               uv run -- python manage.py collectstatic --noinput &&
                uv run -- python manage.py migrate &&
                uv run -- python manage.py init_rag --wait 60 &&
                uv run -- gunicorn api.wsgi:application -c gunicorn.conf.py"
@@ -167,17 +168,21 @@ services:
       context: backend
       target: worker-full
     restart: unless-stopped
-    mem_limit: 2g
+    # 2g wasn't even enough for ONE conversion: a full-length book PDF through
+    # Docling's layout+OCR+table-structure model stack got SIGKILLed on all 3
+    # retry attempts at 2g (confirmed via repeated WorkerLostError/SIGKILL 9 in
+    # logs, container RSS climbing past 1.9GiB before each kill). 4g leaves
+    # real headroom for large real-world documents, not just small test files.
+    mem_limit: 4g
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: >
       bash -c "uv sync --frozen --no-dev --extra docling &&
                uv run -- celery -A api worker --loglevel=INFO --concurrency=1"
     # concurrency=1, not 2: two simultaneous Docling conversions (each loading
-    # its own full layout/OCR/table-structure model stack) inside this
-    # container's 2 GB limit OOM-killed the worker on a 23 MB PDF — confirmed
-    # via repeated SIGKILL/requeue loop in production logs. One conversion at
-    # a time trades ingestion throughput for not crashing on real documents.
+    # its own full layout/OCR/table-structure model stack) would only compound
+    # the memory pressure above. One conversion at a time trades ingestion
+    # throughput for not crashing on real documents.
     <<: *backend-env
     environment:
       # The worker image contains Docling; keep the API slim and fallback-only.
@@ -312,7 +317,7 @@ services:
   # from the app's own `minio` service so the two never share a bucket
   # namespace.
   langfuse-minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     profiles: ["observability"]
     restart: unless-stopped
     mem_limit: 512m

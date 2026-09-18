@@ -40,3 +40,6 @@ celerybeat-schedule*
 
 # local Claude Code tool permissions (may contain test commands/credentials)
 .claude/
+
+# collectstatic output — regenerated on every container start
+/backend/staticfiles/
