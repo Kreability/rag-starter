@@ -12,6 +12,7 @@ dependencies = [
     "django-unfold>=0.43.0",
     "django-cors-headers>=4.6",
     "gunicorn>=23.0",
+    "whitenoise>=6.0",
     "uvicorn[standard]>=0.34",
     # --- async work ---
     "celery[redis]>=5.4",

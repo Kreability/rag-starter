@@ -1,5 +1,9 @@
 .DEFAULT_GOAL := help
-COMPOSE := docker compose
+# `--env-file` is not optional: the langfuse service's ENCRYPTION_KEY has no
+# safe default, so compose fails to even parse the file without it (see
+# docker-compose.yaml's comment on that var) — and .env.backend is also how
+# every other ${VAR} in the core stack gets its value.
+COMPOSE := docker compose --env-file .env.backend
 
 # Production runs from its own compose file and env file. `--env-file` is not
 # optional: without it compose interpolates ${DOMAIN} and friends from .env

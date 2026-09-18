@@ -58,6 +58,7 @@ INSTALLED_APPS = [
 ######################################################################
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -138,11 +139,8 @@ USE_TZ = True
 # Staticfiles
 ######################################################################
 STATIC_URL = "static/"
-
-# Required by `collectstatic`, which the production image runs at build time so
-# the admin/DRF/Swagger assets are baked in. Unused under `runserver`, which
-# serves each app's static/ directory directly.
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 ######################################################################
 # Rest Framework
