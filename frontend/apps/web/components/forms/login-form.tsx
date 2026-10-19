@@ -5,18 +5,10 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useState, useTransition } from 'react'
 
-const inputStyle: React.CSSProperties = {
-  display: 'block',
-  width: '100%',
-  background: 'rgba(255,255,255,0.05)',
-  border: '1px solid var(--color-border)',
-  borderRadius: '10px',
-  color: 'var(--color-foreground)',
-  padding: '10px 14px',
-  fontSize: '14px',
-  outline: 'none',
-  marginTop: '6px'
-}
+import { Alert, AlertDescription } from '@frontend/ui/components/alert'
+import { Button } from '@frontend/ui/components/button'
+import { Input } from '@frontend/ui/components/input'
+import { Label } from '@frontend/ui/components/label'
 
 export function LoginForm() {
   const router = useRouter()
@@ -48,62 +40,36 @@ export function LoginForm() {
   return (
     <form action={onSubmit} className="space-y-4">
       {error && (
-        <div
-          role="alert"
-          className="rounded-xl px-4 py-3 text-sm"
-          style={{
-            background: 'rgba(239,68,68,0.08)',
-            border: '1px solid rgba(239,68,68,0.2)',
-            color: 'var(--color-destructive)'
-          }}
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
-      <div>
-        <label
-          htmlFor="username"
-          className="text-xs font-medium"
-          style={{ color: 'var(--color-muted-foreground)' }}
-        >
-          Username
-        </label>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor="username">Username</Label>
+        <Input
           id="username"
           name="username"
           type="text"
           required
           autoComplete="username"
-          style={inputStyle}
         />
       </div>
 
-      <div>
-        <label
-          htmlFor="password"
-          className="text-xs font-medium"
-          style={{ color: 'var(--color-muted-foreground)' }}
-        >
-          Password
-        </label>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor="password">Password</Label>
+        <Input
           id="password"
           name="password"
           type="password"
           required
           autoComplete="current-password"
-          style={inputStyle}
         />
       </div>
 
-      <button
-        type="submit"
-        disabled={isPending}
-        className="btn-primary w-full !py-2.5 !text-sm"
-      >
+      <Button type="submit" disabled={isPending} className="w-full">
         {isPending ? 'Signing in…' : 'Sign in'}
-      </button>
+      </Button>
 
       <p className="text-center text-xs" style={{ color: 'var(--color-muted-foreground)' }}>
         No account?{' '}

@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxcb1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-RUN uv sync --frozen --no-dev --extra docling
+RUN uv sync --frozen --no-dev --extra docling --extra evaluation
 
 # --- production: sources baked in, served by gunicorn ------------------------
 FROM base AS production

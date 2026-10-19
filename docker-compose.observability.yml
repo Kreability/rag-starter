@@ -1,0 +1,177 @@
+# Observability stack (optional): LLM tracing, prompt versioning, cost
+# tracking, evaluation.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.observability.yml up -d
+#
+# This is a SEPARATE FILE, not a `profiles:` entry in docker-compose.yaml, and
+# that is deliberate. `langfuse-worker` below has no safe default for
+# ENCRYPTION_KEY, so it is declared with a `${LANGFUSE_ENCRYPTION_KEY:?...}`
+# guard. Compose interpolates *every* variable in *every* file it is given,
+# before it looks at profiles — so with the services in docker-compose.yaml
+# that guard fired on a plain `docker compose up` and the core stack could not
+# even be parsed by someone who will never enable Langfuse. Keeping the
+# required-var check in a file that is only loaded when you opt in preserves
+# the check where it actually matters, and lets the core stack start without
+# Langfuse credentials configured at all.
+#
+# Compose only reads .env.backend for ${VAR} interpolation like these when
+# invoked with `--env-file .env.backend`; the `env_file:` keys further down are
+# container-runtime only and do not cover interpolation. Hence the Makefile's
+# `make observability`, which passes it.
+#
+# `name:` is repeated so both files always resolve to the same Compose project
+# and share the core stack's containers, network and `db` service.
+name: rag-system
+
+# LLM tracing, prompt versioning, cost tracking, evaluation.
+#
+# v4 self-hosted (the `langfuse:2` image's server no longer exists as a
+# supported target for the langfuse-python v3+ client, which this project's
+# rag/llm.py uses — v2's server has no OTLP trace-ingestion endpoint).
+# v4 needs ClickHouse (event storage) and its own Redis (job queue) beyond
+# what the core stack already runs; `db`'s existing `langfuse` database is
+# reused for its relational data.
+services:
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
+    user: "101:101"
+    mem_limit: 1g
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: "${LANGFUSE_CLICKHOUSE_PASSWORD:-change-me-clickhouse}"
+    expose:
+      - "8123"
+      - "9000"
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Dedicated Redis for Langfuse's job queue: the core `redis` service runs
+  # allkeys-lru eviction for Celery's broker, which would silently drop
+  # queued Langfuse jobs under memory pressure. Langfuse requires noeviction.
+  langfuse-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    command: --requirepass ${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis} --maxmemory-policy noeviction
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Object storage for Langfuse's exported events and uploaded media. Separate
+  # from the app's own `minio` service so the two never share a bucket
+  # namespace.
+  langfuse-minio:
+    build: ./docker/minio
+    image: rag-minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    mem_limit: 512m
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      MINIO_ROOT_PASSWORD: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    restart: unless-stopped
+    mem_limit: 1g
+    environment: &langfuse-env
+      NEXTAUTH_URL: "http://localhost:${LANGFUSE_HOST_PORT:-3001}"
+      DATABASE_URL: "postgresql://postgres:${DATABASE_PASSWORD:-change-password}@db:5432/langfuse"
+      SALT: "${LANGFUSE_SALT:-change-me-langfuse-salt}"
+      # No safe default: this key encrypts every secret Langfuse stores, and a
+      # well-known placeholder here would silently ship one to anyone who
+      # exposed the dashboard. Failing loudly at `compose up` is the point.
+      # Generate with: openssl rand -hex 32
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY is required — generate with: openssl rand -hex 32}"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse-clickhouse:9000"
+      CLICKHOUSE_URL: "http://langfuse-clickhouse:8123"
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: "${LANGFUSE_CLICKHOUSE_PASSWORD:-change-me-clickhouse}"
+      # Single-node ClickHouse (no Zookeeper/replication configured here).
+      # Without this explicit false, Langfuse's migrations run
+      # `CREATE TABLE ... ON CLUSTER default`, which fails hard on a bare
+      # single node ("no Zookeeper configuration in server config").
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse-minio:9000"
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "http://langfuse-minio:9000"
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: "${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis}"
+    depends_on: &langfuse-depends-on
+      db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+
+  langfuse:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    restart: unless-stopped
+    # 1g OOM-killed the Next.js server during first-boot turbopack compilation
+    # (observed: "FATAL ERROR: Reached heap limit ... JavaScript heap out of
+    # memory"). Runtime footprint is ~120MB; the spike is compile-time only.
+    mem_limit: 2g
+    ports:
+      - "${LANGFUSE_HOST_PORT:-3001}:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET:-change-me-langfuse-secret}"
+      # LANGFUSE_INIT_ORG_ID is the switch: without it, v4 skips the whole
+      # seed step and silently ignores every other LANGFUSE_INIT_* var below
+      # (logged as a warning, easy to miss) — the keys this app is configured
+      # with then belong to no project and every trace export 401s.
+      LANGFUSE_INIT_ORG_ID: "${LANGFUSE_INIT_ORG_ID:-}"
+      LANGFUSE_INIT_ORG_NAME: "${LANGFUSE_INIT_ORG_NAME:-}"
+      LANGFUSE_INIT_PROJECT_ID: "${LANGFUSE_INIT_PROJECT_ID:-}"
+      LANGFUSE_INIT_PROJECT_NAME: "${LANGFUSE_INIT_PROJECT_NAME:-}"
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
+      LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_INIT_USER_EMAIL:-}"
+      LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD:-}"
+    depends_on: *langfuse-depends-on
+
+volumes:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:

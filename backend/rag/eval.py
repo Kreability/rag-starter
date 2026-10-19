@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,29 @@ def _patch_ragas_vertexai_import() -> None:
     sys.modules[module_name] = stub
 
 
+def _run_config_kwargs() -> dict:
+    """RAGAS gives each metric job 180s by default. A reasoning judge routinely
+    needs longer for faithfulness (it extracts and verifies every statement),
+    and a timed-out job silently becomes a missing score. Raise the limit."""
+    try:
+        from ragas.run_config import RunConfig
+    except ImportError:
+        return {}
+    return {"run_config": RunConfig(timeout=int(os.environ.get("EVAL_JUDGE_TIMEOUT", "600")))}
+
+
+def _judge_model(model):
+    """The chat model with extra output budget for judging.
+
+    Reasoning models spend part of `max_tokens` on thinking. The chat budget is
+    sized for answers, and the judge's structured output got cut off ("LLM
+    generation was not completed"), silently dropping metrics.
+    """
+    budget = int(os.environ.get("EVAL_JUDGE_MAX_TOKENS", "8192"))
+    copy = getattr(model, "model_copy", None)
+    return copy(update={"max_tokens": budget}) if copy else model
+
+
 @dataclass
 class EvaluationResult:
     """Single RAGAS evaluation result."""
@@ -79,16 +102,16 @@ def evaluate_rag(
 
     try:
         _patch_ragas_vertexai_import()
+        from datasets import Dataset
         from ragas import evaluate
         from ragas.embeddings import LangchainEmbeddingsWrapper
         from ragas.llms import LangchainLLMWrapper
         from ragas.metrics import (
-            Faithfulness,
             AnswerRelevancy,
             ContextPrecision,
             ContextRecall,
+            Faithfulness,
         )
-        from datasets import Dataset
     except ImportError:
         result.error = "ragas is not installed. Install with: uv sync --extra evaluation"
         result.duration_seconds = time.perf_counter() - start
@@ -100,7 +123,7 @@ def evaluate_rag(
         # than RAGAS's OpenAI-only default, which requires its own key.
         from rag.llm import get_chat_model, get_embedder
 
-        judge_llm = LangchainLLMWrapper(get_chat_model())
+        judge_llm = LangchainLLMWrapper(_judge_model(get_chat_model()))
         judge_embeddings = LangchainEmbeddingsWrapper(get_embedder())
 
         dataset = Dataset.from_list([
@@ -114,6 +137,7 @@ def evaluate_rag(
 
         eval_result = evaluate(
             dataset=dataset,
+            **_run_config_kwargs(),
             metrics=[
                 Faithfulness(),
                 AnswerRelevancy(),
@@ -158,6 +182,6 @@ def evaluate_batch(
     """Evaluate a batch of RAG triples."""
     results = []
     ground_truths = ground_truths or [""] * len(queries)
-    for query, answer, contexts, gt in zip(queries, answers, contexts_list, ground_truths):
+    for query, answer, contexts, gt in zip(queries, answers, contexts_list, ground_truths, strict=True):
         results.append(evaluate_rag(query, answer, contexts, gt))
     return results

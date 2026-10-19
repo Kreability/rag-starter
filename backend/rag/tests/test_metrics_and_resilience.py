@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
-from rag.metrics import PipelineMetrics, get_metrics, log_context
+from rag.metrics import get_metrics
 from rag.resilience import CircuitBreaker, retry
 
 

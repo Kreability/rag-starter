@@ -1,5 +1,12 @@
 .DEFAULT_GOAL := help
-COMPOSE := docker compose
+# --env-file is how every ${VAR} in the core stack gets its value (host ports,
+# database password, S3 keys, ...), because there is no .env in this project.
+COMPOSE := docker compose --env-file .env.backend
+# Langfuse needs a ${LANGFUSE_ENCRYPTION_KEY:?...} with no safe default, which
+# is why it lives in its own compose file rather than a profile here: compose
+# interpolates a whole file before it looks at profiles, so a required-var guard
+# in the core file breaks `docker compose up` for everyone not using Langfuse.
+COMPOSE_OBS := $(COMPOSE) -f docker-compose.yaml -f docker-compose.observability.yml
 
 # Production runs from its own compose file and env file. `--env-file` is not
 # optional: without it compose interpolates ${DOMAIN} and friends from .env
@@ -16,10 +23,10 @@ init: ## Create .env files with generated secrets
 	@test -f .env.backend.template || (echo "FATAL: .env.backend.template missing" && exit 1)
 	@test -f .env.frontend.template || (echo "FATAL: .env.frontend.template missing" && exit 1)
 	@test -f .env.backend  || (cp .env.backend.template .env.backend && \
-		python3 -c "import re,pathlib,secrets,base64;p=pathlib.Path('.env.backend');p.write_text(re.sub(r'^SECRET_KEY=$$','SECRET_KEY='+base64.b64encode(secrets.token_bytes(36)).decode(),p.read_text(),flags=re.M))" && \
+		python3 scripts/gen_secrets.py .env.backend && \
 		echo "created .env.backend")
 	@test -f .env.frontend || (cp .env.frontend.template .env.frontend && \
-		python3 -c "import re,pathlib,secrets,base64;p=pathlib.Path('.env.frontend');p.write_text(re.sub(r'^NEXTAUTH_SECRET=$$','NEXTAUTH_SECRET='+base64.b64encode(secrets.token_bytes(24)).decode(),p.read_text(),flags=re.M))" && \
+		python3 scripts/gen_secrets.py .env.frontend && \
 		echo "created .env.frontend")
 	@echo "Now set LLM_API_KEY and EMBEDDER_API_KEY in .env.backend."
 
@@ -113,9 +120,13 @@ restore: ## Restore a backup (B=backups/<timestamp>)
 
 # -------------------------------------------------------------------- extras ---
 
+.PHONY: eval
+eval: ## Run the golden set + RAGAS (ORG=<slug>, needs the evaluation extra)
+	$(COMPOSE) exec api uv run --extra evaluation python manage.py run_eval --organization $(ORG)
+
 .PHONY: observability
 observability: ## Start the stack with Langfuse tracing
-	$(COMPOSE) --profile observability up -d
+	$(COMPOSE_OBS) up -d
 	@echo "langfuse  http://localhost:$${LANGFUSE_HOST_PORT:-3001}"
 
 .PHONY: local-llm

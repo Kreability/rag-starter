@@ -1,5 +1,6 @@
-import api.models
 from django.db import migrations
+
+import api.models
 
 
 class Migration(migrations.Migration):

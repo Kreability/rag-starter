@@ -164,3 +164,36 @@ def reap_stuck_documents(max_age_minutes: int = 60) -> int:
     if count:
         logger.warning("Reaped %d stuck document(s).", count)
     return count
+
+
+@shared_task(name="rag.run_evaluation", acks_late=False)
+def run_evaluation_task(run_id: str) -> None:
+    """Execute the golden set for an `EvaluationRun` and store the results on it."""
+    from django.utils import timezone
+
+    from rag.evalrun import load_cases, run_case, summarize
+    from rag.models import EvaluationRun
+
+    run = EvaluationRun.objects.select_related("organization").get(pk=run_id)
+    run.status = EvaluationRun.State.RUNNING
+    run.error = ""
+    run.save(update_fields=["status", "error"])
+    try:
+        cases = load_cases()
+        run.total_cases = len(cases)
+        run.save(update_fields=["total_cases"])
+        rows = []
+        for case in cases:
+            rows.append(run_case(case, run.organization, use_ragas=run.use_ragas))
+            # Persist progressively so the admin page shows partial results.
+            run.results = rows
+            run.passed_cases = sum(r["passed"] for r in rows)
+            run.save(update_fields=["results", "passed_cases"])
+        run.summary = summarize(rows)
+        run.status = EvaluationRun.State.DONE
+    except Exception as exc:
+        logger.exception("Evaluation run %s failed.", run_id)
+        run.status = EvaluationRun.State.FAILED
+        run.error = f"{type(exc).__name__}: {exc}"[:2000]
+    run.finished_at = timezone.now()
+    run.save(update_fields=["status", "summary", "error", "finished_at"])

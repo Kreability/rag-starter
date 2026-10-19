@@ -1,6 +1,62 @@
-- id: starter-guide-answer
-  question: "What does the RAG starter guide explain?"
-  document: "RAG_Starter_Beginners_Guide.docx"
-  must_contain: ["RAG"]
-  must_not_contain: ["I couldn't find anything"]
-  min_faithfulness: 0.8
+# Golden set for `manage.py run_eval`, the admin "Evaluation runs" page, and the
+# opt-in live test in test_golden.py. These cases target the book
+# "System Design Interview by Alex Xu.pdf"; replace the document and questions
+# with your own corpus. Ground truths below were taken from the indexed text.
+#
+# Fields:
+#   id                 unique case name
+#   question           what the user asks
+#   document           (optional) document name in the organization; scopes the query
+#   ground_truth       (optional) reference answer, enables RAGAS context_recall
+#   must_contain       phrases the answer must include (case-insensitive)
+#   must_not_contain   phrases that must NOT appear
+#   expected_sources   document names that must appear among the citations
+#   expect_refusal     true for out-of-scope questions: the answer must decline and cite nothing
+#   min_faithfulness   per-case RAGAS faithfulness floor (0-1)
+
+- id: token-bucket
+  question: "How does the token bucket algorithm work in a rate limiter?"
+  document: "System Design Interview by Alex Xu.pdf"
+  expected_sources: ["System Design Interview by Alex Xu.pdf"]
+  ground_truth: >
+    A token bucket is a container with a pre-defined capacity. Tokens are put into the bucket
+    at a preset rate periodically, and once the bucket is full no more tokens are added.
+    Each request consumes one token.
+  must_contain: ["token", "bucket"]
+  min_faithfulness: 0.7
+
+- id: rate-limiting-algorithms
+  question: "Which rate limiting algorithms does the book discuss?"
+  expected_sources: ["System Design Interview by Alex Xu.pdf"]
+  ground_truth: >
+    The algorithms discussed are token bucket, leaking bucket, fixed window,
+    sliding window log, and sliding window counter.
+  must_contain: ["token bucket", "leaking bucket", "sliding window"]
+
+- id: base62-url-shortener
+  question: "How is base 62 conversion used in a URL shortener?"
+  expected_sources: ["System Design Interview by Alex Xu.pdf"]
+  ground_truth: >
+    Base conversion converts the same number between different number representation systems.
+    Base 62 is used because there are 62 possible characters for the hash value.
+  must_contain: ["62"]
+
+- id: virtual-nodes
+  question: "How many virtual nodes should a server get in consistent hashing?"
+  expected_sources: ["System Design Interview by Alex Xu.pdf"]
+  ground_truth: >
+    The number of virtual nodes for a server is proportional to the server capacity,
+    so servers with higher capacity are assigned more virtual nodes.
+  must_contain: ["virtual", "capacity"]
+
+# Out-of-scope: nothing in the corpus covers these, so the system must decline,
+# cite nothing, and not invent an answer. This is the hallucination regression guard.
+- id: out-of-scope-science
+  question: "What is the boiling point of tungsten in Kelvin?"
+  expect_refusal: true
+  must_not_contain: ["5828", "5933"]
+
+- id: out-of-scope-sports
+  question: "Who won the 2022 FIFA World Cup?"
+  expect_refusal: true
+  must_not_contain: ["Argentina", "Messi"]

@@ -10,11 +10,8 @@ Verifies:
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
-
-import pytest
 
 from rag.conf import get_config
 from rag.llm import get_embedder
@@ -47,7 +44,7 @@ class TestEmbedderConfiguration:
 
     def test_embedder_has_valid_dimensions(self) -> None:
         settings = get_config().embedder
-        assert settings.dimensions in (384, 768, 1024, 1536, 3072), (
+        assert settings.dimensions in (384, 768, 1024, 1536, 2048, 3072), (
             f"Unusual embedding dimension: {settings.dimensions}"
         )
 
@@ -78,7 +75,7 @@ class TestEmbeddingQuality:
         self.embedder = get_embedder()
 
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(x * x for x in b))
         return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
@@ -90,10 +87,18 @@ class TestEmbeddingQuality:
     def test_similar_texts_have_high_similarity(self) -> None:
         a = "machine learning and artificial intelligence"
         b = "AI and ML are transforming industries"
-        sim = self._cosine_similarity(
+        unrelated = "the stock market fell today"
+        similar = self._cosine_similarity(
             self.embedder.embed_query(a), self.embedder.embed_query(b)
         )
-        assert sim > 0.6, f"Similar texts should be close in vector space, got {sim}"
+        different = self._cosine_similarity(
+            self.embedder.embed_query(a), self.embedder.embed_query(unrelated)
+        )
+        # Relative, not an absolute bar: asymmetric retrieval models (e.g. NVIDIA
+        # NIM) score query-vs-query similarity lower than symmetric ones.
+        assert similar > different + 0.1, (
+            f"Similar texts should be closer than unrelated ones: {similar} vs {different}"
+        )
 
     def test_unrelated_texts_have_lower_similarity(self) -> None:
         a = "machine learning and artificial intelligence"
@@ -107,7 +112,8 @@ class TestEmbeddingQuality:
         text = "deterministic embedding check"
         vec1 = self.embedder.embed_query(text)
         vec2 = self.embedder.embed_query(text)
-        assert vec1 == vec2, "Same text must produce identical embeddings"
+        # Remote APIs may differ in the last float digit; compare by cosine.
+        assert self._cosine_similarity(vec1, vec2) > 0.99999, "Same text must embed identically"
 
     def test_different_texts_produce_different_embeddings(self) -> None:
         vec1 = self.embedder.embed_query("hello world")
@@ -139,7 +145,7 @@ class TestEmbeddingRetrievalQuality:
         self.embedder = get_embedder()
 
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(x * x for x in b))
         return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
@@ -222,6 +228,8 @@ class TestEmbeddingIdempotency:
         text = "Re-ingestion idempotency check " * 50
         vec1 = self.embedder.embed_query(text)
         vec2 = self.embedder.embed_query(text)
-        assert hashlib.sha256(str(vec1).encode()).hexdigest() == hashlib.sha256(
-            str(vec2).encode()
-        ).hexdigest()
+        # Point IDs come from the chunk's content hash, not the vector, so what
+        # matters is that re-embedding gives (numerically) the same vector.
+        dot = sum(x * y for x, y in zip(vec1, vec2, strict=True))
+        norm = math.sqrt(sum(x * x for x in vec1)) * math.sqrt(sum(y * y for y in vec2))
+        assert dot / norm > 0.99999

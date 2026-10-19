@@ -7,13 +7,11 @@ Run with:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from rag.chunking import pieces_to_documents
 from rag.extract import Piece
-from rag.image_captioner import caption_images, caption_image
+from rag.image_captioner import caption_image, caption_images
 from rag.vectordb import build_filter
 
 
@@ -110,7 +108,7 @@ class TestMixedContentTypes:
             pieces, document_id="d1", owner_id=1, document_name="mixed.txt"
         )
         assert len(documents) == 3
-        assert all(d.metadata["type"] == t for d, t in zip(documents, ["TEXT", "TABLE", "TEXT"]))
+        assert all(d.metadata["type"] == t for d, t in zip(documents, ["TEXT", "TABLE", "TEXT"], strict=True))
 
     def test_empty_table_not_skipped_if_has_words(self):
         table = "| header |\n| --- |\n| value |"
@@ -276,7 +274,6 @@ class TestRetrieverFilters:
         assert build_filter({}) is None
 
     def test_build_filter_single_field(self):
-        from qdrant_client.http import models
         result = build_filter({"owner_id": 42})
         assert result is not None
         assert len(result.must) == 1
@@ -284,7 +281,6 @@ class TestRetrieverFilters:
         assert result.must[0].match.value == 42
 
     def test_build_filter_multiple_fields(self):
-        from qdrant_client.http import models
         result = build_filter({"owner_id": 1, "document_id": "doc-1"})
         assert result is not None
         assert len(result.must) == 2

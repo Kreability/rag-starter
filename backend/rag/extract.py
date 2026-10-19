@@ -97,7 +97,10 @@ def _try_docling(path: Path, name: str) -> tuple[list[Piece], IngestionDiagnosti
     config = get_config().ingestion
     try:
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+        from docling.datamodel.pipeline_options import (
+            PdfPipelineOptions,
+            RapidOcrOptions,
+        )
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling_core.types.doc import PictureItem, TableItem, TextItem
     except ImportError:
@@ -377,12 +380,17 @@ def _extract_csv(path: Path) -> tuple[list[Piece], IngestionDiagnostics]:
 
 
 def extract_url(url: str) -> list[Piece]:
-    """Fetch and extract a single web page. Caller must have SSRF-validated the URL."""
-    import requests
+    """Fetch and extract a single web page.
+
+    The URL is re-validated on every fetch (and every redirect hop) by
+    `safe_get`, so a stored URL that later resolves somewhere internal, or a
+    re-index, cannot reach private addresses.
+    """
     from bs4 import BeautifulSoup
 
-    response = requests.get(url, timeout=30, headers={"User-Agent": "rag-system/1.0"})
-    response.raise_for_status()
+    from rag.security import safe_get
+
+    response = safe_get(url)
 
     soup = BeautifulSoup(response.text, "lxml")
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
@@ -404,14 +412,12 @@ def extract_url(url: str) -> list[Piece]:
 
 def extract_sitemap(sitemap_url: str) -> list[Piece]:
     """Walk a sitemap and extract every page it lists."""
-    import requests
     from bs4 import BeautifulSoup
 
-    from rag.security import validate_public_url
+    from rag.security import safe_get, validate_public_url
 
     config = get_config().ingestion
-    response = requests.get(sitemap_url, timeout=30, headers={"User-Agent": "rag-system/1.0"})
-    response.raise_for_status()
+    response = safe_get(sitemap_url)
 
     soup = BeautifulSoup(response.content, "xml")
     urls = [loc.get_text(strip=True) for loc in soup.find_all("loc")][: config.sitemap_max_pages]

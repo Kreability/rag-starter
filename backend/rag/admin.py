@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from django.contrib import admin, messages
+from django.db import transaction
+from django.utils.html import format_html, format_html_join
 from django.utils.translation import gettext_lazy as _
 from unfold.admin import ModelAdmin, TabularInline
 
@@ -13,13 +15,14 @@ from rag.models import (
     Conversation,
     Document,
     EvaluationReport,
+    EvaluationRun,
     IngestionReport,
     Message,
-    Status,
     QualityScore,
+    Status,
     UsageRecord,
 )
-from rag.tasks import ingest_document_task
+from rag.tasks import ingest_document_task, run_evaluation_task
 
 
 @admin.register(UsageRecord)
@@ -102,19 +105,15 @@ class DocumentAdmin(ModelAdmin):
     fieldsets = (
         (_("Source"), {
             "fields": ["name", "organization", "uploaded_by", "is_private", "source_type", "source_uri", "source_options"],
-            "icon": "upload",
         }),
         (_("Storage"), {
             "fields": ["storage_key", "content_type", "size_bytes", "checksum"],
-            "icon": "cloud",
         }),
         (_("Status"), {
             "fields": ["status", "error_message", "chunk_count", "task_id", "last_ingestion_report"],
-            "icon": "info",
         }),
         (_("Timestamps"), {
             "fields": ["created_at", "modified_at"],
-            "icon": "schedule",
         }),
     )
     readonly_fields = [
@@ -234,26 +233,21 @@ class IngestionReportAdmin(ModelAdmin):
     ]
 
     fieldsets = (
-        (_("Document"), {"fields": ["document"], "icon": "file_text"}),
+        (_("Document"), {"fields": ["document"]}),
         (_("Pages"), {
             "fields": ["pages_detected", "pages_with_text", "pages_without_text", "avg_chars_per_page"],
-            "icon": "description",
         }),
         (_("Extraction"), {
             "fields": ["extractor_used", "ocr_used", "ocr_language", "total_extracted_chars"],
-            "icon": "search",
         }),
         (_("Chunks"), {
             "fields": ["text_chunks", "table_chunks", "image_chunks", "summary_chunks", "failed_summaries"],
-            "icon": "dataset",
         }),
         (_("Pipeline"), {
             "fields": ["embedding_status", "vector_upload_status", "ingestion_duration_seconds"],
-            "icon": "settings",
         }),
         (_("Diagnostics"), {
             "fields": ["warnings", "quality_score", "created_at"],
-            "icon": "warning",
         }),
     )
 
@@ -369,8 +363,8 @@ class EvaluationReportAdmin(ModelAdmin):
     ]
 
     fieldsets = (
-        (_("Document"), {"fields": ["document"], "icon": "file_text"}),
-        (_("Query & Answer"), {"fields": ["query", "answer"], "icon": "chat"}),
+        (_("Document"), {"fields": ["document"]}),
+        (_("Query & Answer"), {"fields": ["query", "answer"]}),
         (_("Scores"), {
             "fields": [
                 "faithfulness_score",
@@ -378,10 +372,97 @@ class EvaluationReportAdmin(ModelAdmin):
                 "context_precision_score",
                 "context_recall_score",
             ],
-            "icon": "grade",
         }),
         (_("Metadata"), {
             "fields": ["chunks_retrieved", "evaluation_duration_seconds", "metadata", "created_at"],
-            "icon": "info",
         }),
     )
+
+
+# ── Evaluation runs ──────────────────────────────────────────────────────────
+
+
+@admin.register(EvaluationRun)
+class EvaluationRunAdmin(ModelAdmin):
+    """Launch the golden set from the admin: "Add evaluation run" queues it.
+
+    The run executes in the Celery worker; reload the page to watch the status
+    and per-case results fill in. Finished runs are read-only history.
+    """
+
+    list_display = ["created_at", "organization", "status", "result", "mean_faithfulness", "hit_rate", "use_ragas"]
+    list_filter = ["status", "organization", "created_at"]
+    list_per_page = 25
+    date_hierarchy = "created_at"
+    actions = ["rerun"]
+
+    @admin.display(description=_("Passed"))
+    def result(self, obj):
+        return f"{obj.passed_cases}/{obj.total_cases}" if obj.total_cases else "-"
+
+    @admin.display(description=_("Faithfulness"))
+    def mean_faithfulness(self, obj):
+        value = (obj.summary or {}).get("mean_faithfulness")
+        return f"{value:.2f}" if value is not None else "-"
+
+    @admin.display(description=_("Retrieval hit rate"))
+    def hit_rate(self, obj):
+        value = (obj.summary or {}).get("retrieval_hit_rate")
+        return f"{value:.2f}" if value is not None else "-"
+
+    @admin.display(description=_("Case results"))
+    def case_table(self, obj):
+        if not obj.results:
+            return _("No results yet. Reload this page in a moment.")
+        rows = format_html_join(
+            "",
+            "<tr><td>{}</td><td>{}</td><td>{}s</td><td>{}</td><td>{}</td></tr>",
+            (
+                (
+                    r["id"],
+                    "PASS" if r["passed"] else "FAIL",
+                    r["seconds"],
+                    ", ".join(f"{k[:5]}={v:.2f}" for k, v in r["scores"].items() if v is not None) or "-",
+                    "; ".join(r["failures"]) or "-",
+                )
+                for r in obj.results
+            ),
+        )
+        return format_html(
+            "<table><thead><tr><th>Case</th><th>Result</th><th>Time</th><th>Scores</th><th>Failures</th></tr></thead>"
+            "<tbody>{}</tbody></table>",
+            rows,
+        )
+
+    def get_fields(self, request, obj=None):
+        if obj is None:
+            return ["organization", "use_ragas"]
+        return ["organization", "use_ragas", "status", "result", "mean_faithfulness", "hit_rate",
+                "error", "triggered_by", "created_at", "finished_at", "case_table"]
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return []
+        return self.get_fields(request, obj)
+
+    def has_change_permission(self, request, obj=None):
+        # Adding launches a run; existing runs are history, viewable but not editable.
+        return obj is None or request.user.is_superuser
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            return
+        obj.triggered_by = request.user
+        obj.status = EvaluationRun.State.QUEUED
+        super().save_model(request, obj, form, change)
+        transaction.on_commit(lambda: run_evaluation_task.delay(str(obj.pk)))
+        messages.info(request, _("Evaluation queued. Reload this page to see progress."))
+
+    @admin.action(description=_("Run again (new run with the same settings)"))
+    def rerun(self, request, queryset):
+        for run in queryset:
+            new = EvaluationRun.objects.create(
+                organization=run.organization, use_ragas=run.use_ragas, triggered_by=request.user
+            )
+            transaction.on_commit(lambda pk=new.pk: run_evaluation_task.delay(str(pk)))
+        self.message_user(request, _("%d evaluation run(s) queued.") % queryset.count(), messages.SUCCESS)

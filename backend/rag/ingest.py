@@ -35,7 +35,7 @@ from rag.extract import (
 )
 from rag.image_captioner import caption_images
 from rag.llm import flush_traces, get_trace_callbacks
-from rag.metrics import get_metrics, log_context
+from rag.metrics import get_metrics
 from rag.models import Chunk, Document, IngestionReport, SourceType, Status
 from rag.quality import IngestionDiagnostics, build_warnings, score_quality
 
@@ -600,15 +600,17 @@ def _extract(document: Document) -> tuple[list[Piece], IngestionDiagnostics]:
         )
 
     if document.source_type == SourceType.CONFLUENCE:
-        import os
 
         options = document.source_options or {}
         space_key = options.get("space_key")
         if not space_key:
             raise IngestionError("Confluence sources require a 'space_key'.")
-        token = options.get("token") or os.environ.get("CONFLUENCE_TOKEN", "")
+        token = options.get("token") or _configured_confluence_token(document.source_uri)
         if not token:
-            raise IngestionError("Confluence sources require CONFLUENCE_TOKEN to be set.")
+            raise IngestionError(
+                "No Confluence credentials for this host. Set CONFLUENCE_URL and "
+                "CONFLUENCE_TOKEN for the Confluence instance you want to ingest."
+            )
         return extract_confluence(
             url=document.source_uri,
             space_key=space_key,
@@ -617,6 +619,25 @@ def _extract(document: Document) -> tuple[list[Piece], IngestionDiagnostics]:
         ), IngestionDiagnostics(extractor_used="confluence", pages_detected=1)
 
     raise IngestionError(f"Unsupported source type '{document.source_type}'.")
+
+
+def _configured_confluence_token(source_uri: str) -> str:
+    """Return the server's Confluence token only for the Confluence it belongs to.
+
+    The token is a server-side secret. Users choose `source_uri`, so handing the
+    token to whatever host they typed would let any user exfiltrate it by
+    pointing a "Confluence source" at a server they control. It is released
+    only when the host matches the operator-configured `CONFLUENCE_URL`.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    token = os.environ.get("CONFLUENCE_TOKEN", "")
+    configured = urlparse(os.environ.get("CONFLUENCE_URL", "")).hostname
+    requested = urlparse(source_uri).hostname
+    if token and configured and requested and configured.lower() == requested.lower():
+        return token
+    return ""
 
 
 def _purge_existing(document: Document) -> None:

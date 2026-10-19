@@ -239,6 +239,16 @@ class Conversation(models.Model):
         related_name="conversations",
         verbose_name=_("organization"),
     )
+    # Owner of the thread. Nullable only for rows created before conversations
+    # were user-scoped; those stay visible to org admins alone.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="conversations",
+        verbose_name=_("user"),
+    )
     title = models.CharField(_("title"), max_length=255, blank=True, default="")
     created_at = models.DateTimeField(_("created at"), auto_now_add=True)
     modified_at = models.DateTimeField(_("modified at"), auto_now=True)
@@ -252,7 +262,8 @@ class Conversation(models.Model):
             models.Index(
                 fields=["organization", "-modified_at"],
                 name="rag_convers_organiz_765cd4_idx",
-            )
+            ),
+            models.Index(fields=["user", "-modified_at"], name="rag_convers_user_mod_idx"),
         ]
 
     def __str__(self) -> str:
@@ -390,3 +401,43 @@ class UsageRecord(models.Model):
     def __str__(self) -> str:
         total = self.prompt_tokens + self.completion_tokens
         return f"{self.organization} · {self.operation} · {self.model} · {total} tokens"
+
+
+class EvaluationRun(models.Model):
+    """One execution of the golden set, launched from the admin or `run_eval`."""
+
+    class State(models.TextChoices):
+        QUEUED = "QUEUED", _("Queued")
+        RUNNING = "RUNNING", _("Running")
+        DONE = "DONE", _("Done")
+        FAILED = "FAILED", _("Failed")
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "api.Organization", on_delete=models.CASCADE, related_name="evaluation_runs", verbose_name=_("organization")
+    )
+    triggered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name=_("triggered by"),
+    )
+    use_ragas = models.BooleanField(
+        _("score with RAGAS"), default=True,
+        help_text=_("Needs the evaluation extra and a working judge model. Uncheck for fast deterministic checks only."),
+    )
+    status = models.CharField(_("status"), max_length=16, choices=State.choices, default=State.QUEUED)
+    total_cases = models.PositiveIntegerField(_("cases"), default=0)
+    passed_cases = models.PositiveIntegerField(_("passed"), default=0)
+    summary = models.JSONField(_("summary"), default=dict, blank=True)
+    results = models.JSONField(_("results"), default=list, blank=True)
+    error = models.TextField(_("error"), blank=True, default="")
+    created_at = models.DateTimeField(_("created at"), auto_now_add=True)
+    finished_at = models.DateTimeField(_("finished at"), null=True, blank=True)
+
+    class Meta:
+        db_table = "rag_evaluation_runs"
+        verbose_name = _("evaluation run")
+        verbose_name_plural = _("evaluation runs")
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Run {self.created_at:%Y-%m-%d %H:%M} · {self.status}"

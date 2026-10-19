@@ -74,6 +74,13 @@ class Command(BaseCommand):
             defaults={"email": environ.get("DEV_EMAIL", "dev@example.com")},
         )
 
+        # get_or_create() bypasses UserManager._create_user(), so a freshly
+        # created row has no organization — and rag_conversations.organization_id
+        # is NOT NULL, so the first chat message 500s. Assign one the same way
+        # create_user() would.
+        if user.organization_id is None:
+            user.organization = User.objects._organization_for(username)
+
         # Always reset the password: the env file is the source of truth, so a
         # changed DEV_PASSWORD should take effect on the next boot.
         user.set_password(password)

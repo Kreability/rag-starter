@@ -6,7 +6,6 @@ import logging
 from typing import Any
 
 from django.contrib.auth import get_user_model
-from django.db import transaction
 
 from rag.models import AuditLog
 

@@ -157,11 +157,10 @@ class Command(BaseCommand):
         If wiping all organizations, delete every object. For one organization,
         delete only the storage keys attached to that organization's documents.
         """
-        import boto3.exceptions
         from botocore.exceptions import ClientError
 
-        from rag.storage import get_s3_client
         from rag.conf import get_config
+        from rag.storage import get_s3_client
 
         settings = get_config().s3
         client = get_s3_client()

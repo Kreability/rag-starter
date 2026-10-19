@@ -8,7 +8,6 @@ dimensions can be added without changing call sites.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 logger = logging.getLogger(__name__)

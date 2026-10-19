@@ -13,7 +13,10 @@ from hashlib import sha256
 from typing import Any
 
 from langchain_core.documents import Document
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 
 from rag.conf import get_config
 from rag.extract import Piece

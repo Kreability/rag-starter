@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from rag.graph import is_small_talk, _route_from_start, _conversational_node
 from rag.conf import get_config
+from rag.graph import _conversational_node, _route_from_start, is_small_talk
 
 
 def test_pure_greetings_are_small_talk():
@@ -66,7 +66,6 @@ def test_disabled_gate_sends_everything_to_retrieval():
 
 def test_template_mode_returns_static_reply_without_llm():
     import asyncio
-    from unittest.mock import AsyncMock
 
     with patch("rag.graph.get_chat_model", side_effect=AssertionError("no LLM call")) as llm:
         result = asyncio.run(_conversational_node({"question": "hey"}))

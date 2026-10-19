@@ -206,6 +206,12 @@ class IngestionSettings(BaseSettings):
     sitemap_max_pages: int = Field(default=200)
     # SSRF guard: only these schemes may be fetched for URL/sitemap sources.
     allowed_url_schemes: str = Field(default="https,http")
+    # Remote fetches: cap the body and the number of redirect hops we follow.
+    max_fetch_size_mb: int = Field(default=20)
+    max_redirects: int = Field(default=5)
+    # Archive limits (zip-bomb defence): entry count and total uncompressed size.
+    zip_max_entries: int = Field(default=200)
+    zip_max_total_size_mb: int = Field(default=500)
 
 
 class ImageCaptioningSettings(BaseSettings):

@@ -16,14 +16,14 @@ import zipfile
 
 from asgiref.sync import async_to_sync
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import transaction
 from django.db.models import Q
 from django.http import StreamingHttpResponse
-from django.core.files.uploadedfile import SimpleUploadedFile
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -32,12 +32,22 @@ from rest_framework.views import APIView
 
 from api.permissions import IsOrgAdmin
 from rag import storage
-from rag.audit import log_action, log_document_delete, log_document_reindex, log_query
+from rag.audit import log_document_delete, log_document_reindex, log_query
+from rag.conf import get_config
 from rag.graph import answer as run_answer
 from rag.graph import astream_answer
 from rag.ingest import delete_document
 from rag.llm import get_trace_callbacks
-from rag.models import AuditLog, Chunk, Conversation, Document, EvaluationReport, IngestionReport, Message, SourceType, Status
+from rag.models import (
+    AuditLog,
+    Chunk,
+    Conversation,
+    Document,
+    EvaluationReport,
+    Message,
+    SourceType,
+    Status,
+)
 from rag.security import validate_upload
 from rag.serializers import (
     AuditLogSerializer,
@@ -66,6 +76,17 @@ def visible_documents(user):
     if getattr(user, "is_org_admin", False):
         return queryset
     return queryset.filter(Q(is_private=False) | Q(uploaded_by=user)).distinct()
+
+
+def can_modify_document(user, document: Document) -> bool:
+    """Only the uploader or an org admin may replace, re-index or delete a document."""
+    if document.organization_id != getattr(user, "organization_id", None):
+        return False
+    return bool(getattr(user, "is_org_admin", False) or document.uploaded_by_id == user.pk)
+
+
+def _wants_replace(request) -> bool:
+    return str(request.data.get("replace", "")).lower() in {"1", "true", "yes"}
 
 
 class DocumentViewSet(
@@ -102,6 +123,11 @@ class DocumentViewSet(
         content_type = uploaded.resolved_content_type
         storage_key = f"{request.user.pk}/{uuid.uuid4()}/{name}"
 
+        existing = self._existing(organization, name)
+        conflict = self._conflict(request, existing, name)
+        if conflict is not None:
+            return conflict
+
         # Store the bytes before creating the row, so a READY row always has a file.
         try:
             storage.upload_fileobj(uploaded, storage_key, content_type)
@@ -112,19 +138,17 @@ class DocumentViewSet(
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        document, created = Document.objects.update_or_create(
+        document, created = self._save_document(
+            existing,
             organization=organization,
             name=name,
+            uploader=request.user,
             defaults={
-                "uploaded_by": request.user,
                 "is_private": serializer.validated_data.get("is_private", False),
                 "source_type": SourceType.FILE,
-                "status": Status.PROCESSING,
                 "storage_key": storage_key,
                 "content_type": content_type,
                 "size_bytes": uploaded.size,
-                "error_message": "",
-                "chunk_count": 0,
             },
         )
         self._queue(document)
@@ -148,34 +172,9 @@ class DocumentViewSet(
         files_to_upload: list[tuple[str, io.BytesIO, str]] = []
 
         if data.get("zip_file"):
-            zip_file = data["zip_file"]
-            try:
-                with zipfile.ZipFile(zip_file, "r") as zf:
-                    for info in zf.infolist():
-                        if info.is_dir():
-                            continue
-                        name = info.filename
-                        if not name or name.endswith("/"):
-                            continue
-                        content = zf.read(info)
-                        candidate = SimpleUploadedFile(
-                            name,
-                            content,
-                            content_type="application/octet-stream",
-                        )
-                        try:
-                            safe_name, content_type = validate_upload(candidate)
-                        except DjangoValidationError as exc:
-                            return Response(
-                                {"detail": exc.messages},
-                                status=status.HTTP_400_BAD_REQUEST,
-                            )
-                        files_to_upload.append((safe_name, io.BytesIO(content), content_type))
-            except zipfile.BadZipFile:
-                return Response(
-                    {"detail": "Invalid ZIP file."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            zip_error = self._read_zip(data["zip_file"], files_to_upload)
+            if zip_error is not None:
+                return zip_error
 
         if data.get("files"):
             for uploaded in data["files"]:
@@ -196,36 +195,44 @@ class DocumentViewSet(
             )
 
         documents = []
+        skipped = []
         for name, content_io, content_type in files_to_upload:
+            existing = self._existing(organization, name)
+            if self._conflict(request, existing, name) is not None:
+                skipped.append({"name": name, "reason": "A document with this name already exists."})
+                continue
+
             storage_key = f"{request.user.pk}/{uuid.uuid4()}/{name}"
             try:
                 storage.upload_fileobj(content_io, storage_key, content_type)
             except Exception:
                 logger.exception("Object storage upload failed for '%s'.", name)
+                skipped.append({"name": name, "reason": "Could not store the file."})
                 continue
 
-            document, _ = Document.objects.update_or_create(
+            document, _ = self._save_document(
+                existing,
                 organization=organization,
                 name=name,
+                uploader=request.user,
                 defaults={
-                    "uploaded_by": request.user,
                     "is_private": data.get("is_private", False),
                     "source_type": SourceType.FILE,
-                    "status": Status.PROCESSING,
                     "storage_key": storage_key,
                     "content_type": content_type,
                     "size_bytes": content_io.getbuffer().nbytes,
-                    "error_message": "",
-                    "chunk_count": 0,
                 },
             )
             self._queue(document)
             documents.append(document)
 
-        return Response(
-            DocumentSerializer(documents, many=True).data,
-            status=status.HTTP_202_ACCEPTED,
-        )
+        if not documents:
+            return Response(
+                {"detail": "No files were accepted.", "skipped": skipped},
+                status=status.HTTP_409_CONFLICT,
+            )
+        body = {"documents": DocumentSerializer(documents, many=True).data, "skipped": skipped}
+        return Response(body, status=status.HTTP_202_ACCEPTED)
 
     @extend_schema(
         request=SourceUploadSerializer,
@@ -239,21 +246,24 @@ class DocumentViewSet(
         data = serializer.validated_data
         organization = request.user.organization
 
-        document, created = Document.objects.update_or_create(
+        existing = self._existing(organization, data["name"])
+        conflict = self._conflict(request, existing, data["name"])
+        if conflict is not None:
+            return conflict
+
+        document, created = self._save_document(
+            existing,
             organization=organization,
             name=data["name"],
+            uploader=request.user,
             defaults={
-                "uploaded_by": request.user,
                 "is_private": data.get("is_private", False),
                 "source_type": data["source_type"],
                 "source_uri": data["source_uri"],
-                "status": Status.PROCESSING,
                 "source_options": {
                     "space_key": data.get("space_key", ""),
                     "verify_ssl": data.get("verify_ssl", True),
                 },
-                "error_message": "",
-                "chunk_count": 0,
             },
         )
         self._queue(document)
@@ -266,6 +276,8 @@ class DocumentViewSet(
     @action(detail=True, methods=["post"])
     def reindex(self, request, pk=None):
         document = self.get_object()
+        if not can_modify_document(request.user, document):
+            raise PermissionDenied("Only the uploader or an organization admin can re-index this document.")
         document.status = Status.PROCESSING
         document.error_message = ""
         document.save(update_fields=["status", "error_message", "modified_at"])
@@ -314,12 +326,101 @@ class DocumentViewSet(
 
     def perform_destroy(self, instance):
         """Delete vectors and the stored file alongside the row."""
+        if not can_modify_document(self.request.user, instance):
+            raise PermissionDenied("Only the uploader or an organization admin can delete this document.")
         delete_document(instance)
         log_document_delete(
             actor=self.request.user,
             document_id=str(instance.id),
             ip_address=self._get_client_ip(self.request),
         )
+
+    @staticmethod
+    def _existing(organization, name: str) -> Document | None:
+        return Document.objects.filter(organization=organization, name=name).first()
+
+    @staticmethod
+    def _conflict(request, existing: Document | None, name: str):
+        """409 unless the caller explicitly replaces a document they may modify.
+
+        Replacing by name used to be silent, so any member could overwrite
+        another member's document (or a private one) just by uploading a file
+        with the same name. The message is the same whether or not the caller
+        can see the existing document, so names of private files do not leak.
+        """
+        if existing is None:
+            return None
+        if _wants_replace(request) and can_modify_document(request.user, existing):
+            return None
+        return Response(
+            {"detail": f"A document named '{name}' already exists.", "code": "duplicate_name"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    @staticmethod
+    def _save_document(existing, *, organization, name, uploader, defaults):
+        """Create a document, or replace `existing` (already authorised by `_conflict`)."""
+        values = {
+            "uploaded_by": uploader,
+            "status": Status.PROCESSING,
+            "error_message": "",
+            "chunk_count": 0,
+            "source_uri": "",
+            "source_options": {},
+            **defaults,
+        }
+        if existing is None:
+            return Document.objects.create(organization=organization, name=name, **values), True
+
+        old_key = existing.storage_key
+        for field, value in values.items():
+            setattr(existing, field, value)
+        existing.save()
+        if old_key and old_key != existing.storage_key:
+            try:
+                storage.delete(old_key)
+            except Exception:
+                logger.warning("Could not delete replaced object '%s'.", old_key, exc_info=True)
+        return existing, False
+
+    @staticmethod
+    def _read_zip(zip_file, files_to_upload: list):
+        """Unpack a ZIP defensively. Returns an error Response, or None on success.
+
+        Entry count and sizes are checked from the central directory *before*
+        anything is decompressed, and each read is also bounded, because the
+        declared `file_size` is attacker-controlled and can lie.
+        """
+        limits = get_config().ingestion
+        max_entry = limits.max_file_size_mb * 1024 * 1024
+        max_total = limits.zip_max_total_size_mb * 1024 * 1024
+
+        def reject(detail):
+            return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with zipfile.ZipFile(zip_file, "r") as zf:
+                entries = [i for i in zf.infolist() if not i.is_dir() and i.filename and not i.filename.endswith("/")]
+                if len(entries) > limits.zip_max_entries:
+                    return reject(f"ZIP has too many files (limit {limits.zip_max_entries}).")
+                if sum(i.file_size for i in entries) > max_total:
+                    return reject(f"ZIP expands to more than {limits.zip_max_total_size_mb} MB.")
+                for info in entries:
+                    if info.file_size > max_entry:
+                        return reject(f"'{info.filename}' is larger than {limits.max_file_size_mb} MB.")
+                    with zf.open(info) as handle:
+                        content = handle.read(max_entry + 1)
+                    if len(content) > max_entry:
+                        return reject(f"'{info.filename}' is larger than {limits.max_file_size_mb} MB.")
+                    candidate = SimpleUploadedFile(info.filename, content, content_type="application/octet-stream")
+                    try:
+                        safe_name, content_type = validate_upload(candidate)
+                    except DjangoValidationError as exc:
+                        return Response({"detail": exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+                    files_to_upload.append((safe_name, io.BytesIO(content), content_type))
+        except zipfile.BadZipFile:
+            return reject("Invalid ZIP file.")
+        return None
 
     @staticmethod
     def _get_client_ip(request) -> str | None:
@@ -362,9 +463,15 @@ class ChatViewSet(viewsets.GenericViewSet):
     def get_queryset(self):
         if not getattr(self.request.user, "organization_id", None):
             return Conversation.objects.none()
-        return Conversation.objects.filter(
-            organization_id=self.request.user.organization_id
-        )
+        return self._conversations(self.request.user)
+
+    @staticmethod
+    def _conversations(user):
+        """A user's own threads. Pre-scoping rows (no owner) are admin-only."""
+        queryset = Conversation.objects.filter(organization_id=user.organization_id)
+        if getattr(user, "is_org_admin", False):
+            return queryset.filter(Q(user=user) | Q(user__isnull=True))
+        return queryset.filter(user=user)
 
     @extend_schema(
         request=ChatRequestSerializer,
@@ -518,20 +625,19 @@ class ChatViewSet(viewsets.GenericViewSet):
 
     def _get_conversation(self, request, conversation_id) -> Conversation:
         if conversation_id:
-            conversation = Conversation.objects.filter(
-                pk=conversation_id,
-                organization_id=request.user.organization_id,
-            ).first()
+            conversation = self.get_queryset().filter(pk=conversation_id).first()
             if conversation is None:
                 # Do not leak whether the id exists for another user.
                 raise ValidationError({"conversation_id": "Unknown conversation."})
             return conversation
-        return Conversation.objects.create(organization_id=request.user.organization_id)
+        return Conversation.objects.create(
+            organization_id=request.user.organization_id, user=request.user
+        )
 
     def _validate_document(self, request, document_id) -> str | None:
         if not document_id:
             return None
-        exists = self.get_queryset().filter(pk=document_id).exists()
+        exists = visible_documents(request.user).filter(pk=document_id).exists()
         if not exists:
             raise ValidationError({"document_id": "Unknown document."})
         return str(document_id)

@@ -2,6 +2,7 @@ import { getServerSession } from 'next-auth'
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 
+import { Badge } from '@frontend/ui/components/badge'
 import { authOptions } from '@/lib/auth'
 import { assertDevModeAllowed, DEV_MODE } from '@/lib/token'
 import { SignOutButton } from '@/components/forms/sign-out-button'
@@ -36,12 +37,7 @@ export default async function RagLayout({ children }: { children: React.ReactNod
 
         <div className="ml-auto flex items-center gap-2">
           {DEV_MODE ? (
-            <span
-              className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
-              style={{ background: 'rgba(251,191,36,0.1)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.2)' }}
-            >
-              Dev
-            </span>
+            <Badge variant="warning" className="uppercase tracking-wider">Dev</Badge>
           ) : (
             <>
               <span className="text-xs" style={{ color: 'var(--color-muted-foreground)' }}>

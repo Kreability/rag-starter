@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from rag.quality import IngestionDiagnostics, build_warnings, score_quality
 
 
