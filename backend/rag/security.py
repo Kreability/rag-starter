@@ -12,7 +12,7 @@ import ipaddress
 import logging
 import re
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
@@ -152,7 +152,8 @@ def _is_benign_text_mismatch(sniffed: str, allowed: tuple[str, ...]) -> bool:
 
 # --- SSRF guard -----------------------------------------------------------
 
-_BLOCKED_PORTS = {22, 23, 25, 3306, 5432, 6379, 9000, 11211, 27017}
+# Includes this stack's own infrastructure (Qdrant 6333/6334, MinIO 9000/9001).
+_BLOCKED_PORTS = {22, 23, 25, 3306, 5432, 6333, 6334, 6379, 9000, 9001, 11211, 27017}
 
 
 def validate_public_url(raw_url: str) -> str:
@@ -199,3 +200,63 @@ def validate_public_url(raw_url: str) -> str:
                 _("URL resolves to a non-public address (%(ip)s).") % {"ip": address}
             )
     return url
+
+
+class FetchError(Exception):
+    """A remote fetch was refused or failed a safety check."""
+
+
+def safe_get(url: str, *, timeout: float = 30, headers: dict | None = None):
+    """GET a public URL without trusting redirects or unbounded bodies.
+
+    `validate_public_url` only checks the URL it is given. Following redirects
+    blindly lets a public page answer `302 -> http://169.254.169.254/...` and
+    bypass it, so redirects are handled manually and every hop is re-validated.
+    The body is streamed and capped so a hostile server cannot exhaust memory.
+
+    Returns a `requests.Response` whose content is fully read (`.content`,
+    `.text` work as usual). Raises `FetchError` on any violation.
+    """
+    import requests
+
+    settings = get_config().ingestion
+    max_bytes = settings.max_fetch_size_mb * 1024 * 1024
+    request_headers = {"User-Agent": "rag-system/1.0", **(headers or {})}
+
+    current = url
+    for _hop in range(settings.max_redirects + 1):
+        try:
+            validate_public_url(current)
+        except ValidationError as exc:
+            raise FetchError("; ".join(exc.messages)) from exc
+
+        response = requests.get(
+            current, timeout=timeout, headers=request_headers, allow_redirects=False, stream=True
+        )
+        if response.is_redirect or response.is_permanent_redirect:
+            location = response.headers.get("Location", "")
+            response.close()
+            if not location:
+                raise FetchError("Redirect without a Location header.")
+            current = urljoin(current, location)
+            continue
+
+        declared = response.headers.get("Content-Length")
+        if declared and declared.isdigit() and int(declared) > max_bytes:
+            response.close()
+            raise FetchError(f"Response is larger than {settings.max_fetch_size_mb} MB.")
+
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                response.close()
+                raise FetchError(f"Response is larger than {settings.max_fetch_size_mb} MB.")
+            chunks.append(chunk)
+        response._content = b"".join(chunks)
+        response._content_consumed = True
+        response.raise_for_status()
+        return response
+
+    raise FetchError(f"Too many redirects (limit {settings.max_redirects}).")

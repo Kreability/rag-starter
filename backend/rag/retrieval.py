@@ -16,16 +16,14 @@ so tenant isolation is enforced in the query itself rather than after the fact.
 """
 
 from __future__ import annotations
-from rag.conf import RetrieverSettings
 
 import asyncio
 import logging
 
 from langchain_core.documents import Document
-
-from rag.conf import get_config
 from qdrant_client.http import models
 
+from rag.conf import RetrieverSettings, get_config
 from rag.vectordb import asearch, collection_available, get_documents_by_ids
 
 logger = logging.getLogger(__name__)

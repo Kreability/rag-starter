@@ -409,7 +409,7 @@ class TestExtraction:
             "rag.image_captioner.caption_image", return_value="A red bar chart showing Q3 revenue."
         ) as mock_caption, patch(
             "rag.image_captioner._upload_image", return_value="images/doc-1/page-1.png"
-        ) as mock_upload:
+        ):
             mock_config.return_value.image_captioner.enabled = True
             mock_config.return_value.image_captioner.max_concurrency = 2
             result = asyncio.run(caption_images(pieces, document_id="doc-1"))

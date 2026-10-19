@@ -344,6 +344,11 @@ UNFOLD = {
                         "link": reverse_lazy("admin:rag_ingestionreport_changelist"),
                     },
                     {
+                        "title": _("Evaluation Runs"),
+                        "icon": "play_circle",
+                        "link": reverse_lazy("admin:rag_evaluationrun_changelist"),
+                    },
+                    {
                         "title": _("Evaluation Reports"),
                         "icon": "grade",
                         "link": reverse_lazy("admin:rag_evaluationreport_changelist"),

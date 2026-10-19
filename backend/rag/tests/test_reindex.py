@@ -25,8 +25,8 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from rag.conf import get_config
-from rag.ingest import _extract, _persist_chunks, _purge_existing, ingest_document
-from rag.models import Chunk, Document, SourceType, Status
+from rag.ingest import _purge_existing, ingest_document
+from rag.models import Document, SourceType, Status
 from rag.quality import IngestionDiagnostics
 
 

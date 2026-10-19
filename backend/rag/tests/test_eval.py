@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from rag.eval import EvaluationResult, evaluate_batch, evaluate_rag
 

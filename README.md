@@ -120,18 +120,15 @@ Qdrant, MinIO, Redis, and Langfuse remain as _infrastructure_ — those are data
 **Prerequisites:** Docker and Docker Compose. Nothing else — no local Python, Node, or database.
 
 ```bash
-# 1. Configuration
-cp .env.backend.template .env.backend
-cp .env.frontend.template .env.frontend
+# 1. Configuration — copies both templates and fills in the generated
+#    secrets (Django SECRET_KEY, NextAuth secret, Langfuse keys).
+make init
 
-# 2. Generate a Django secret key
-openssl rand -base64 48        # paste into SECRET_KEY in .env.backend
-
-# 3. Add your model provider credentials in .env.backend
+# 2. Add your model provider credentials in .env.backend
 #    LLM_API_KEY=sk-...
 #    EMBEDDER_API_KEY=sk-...
 
-# 4. Start everything
+# 3. Start everything
 docker compose up
 ```
 
@@ -201,8 +198,16 @@ Then set `LLM_BASE_URL=http://ollama:11434/v1`, `EMBEDDER_BASE_URL=http://ollama
 ### LLM observability with Langfuse
 
 ```bash
-docker compose --profile observability up      # Langfuse at http://localhost:3001
+make observability                              # Langfuse at http://localhost:3001
 ```
+
+That is shorthand for:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.observability.yml up -d
+```
+
+Langfuse lives in a second compose file rather than a `--profile` entry because it needs an `ENCRYPTION_KEY` that has no safe default, and Compose interpolates every variable in a file *before* it evaluates profiles. As a profile in the main file, that requirement would break plain `docker compose up` for everyone not using Langfuse. `make init` generates the key for you; if you skipped it, run `openssl rand -hex 32` and paste it into `LANGFUSE_ENCRYPTION_KEY` in `.env.backend`.
 
 Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env.backend` to trace every retrieval, prompt, token count, and cost. Leave them empty and tracing is silently disabled — no code changes needed.
 

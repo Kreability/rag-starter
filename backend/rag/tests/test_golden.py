@@ -32,8 +32,18 @@ def assert_golden_answer(case: dict, answer_text: str) -> None:
         )
 
 
+def test_golden_file_is_well_formed():
+    ids = [case["id"] for case in GOLDEN]
+    assert len(ids) == len(set(ids)), "golden case ids must be unique"
+    for case in GOLDEN:
+        assert case["question"].strip()
+        assert case.get("expect_refusal") or case.get("expected_sources") or case.get("must_contain"), (
+            f"{case['id']}: a case needs at least one assertion"
+        )
+
+
 def test_golden_assertions_are_deterministic():
-    case = GOLDEN[0]
+    case = {"must_contain": ["RAG"], "must_not_contain": ["I couldn't find anything"]}
     assert_golden_answer(case, "RAG explains retrieval augmented generation.")
     with pytest.raises(AssertionError):
         assert_golden_answer(case, "I couldn't find anything in the knowledge base.")
@@ -56,5 +66,6 @@ def test_golden_answers(case: dict):
             organization_id=organization_id,
         )
     )
-    assert result["confidence"] != "unknown", "golden answer had no scored citations"
+    if not case.get("expect_refusal"):
+        assert result["confidence"] != "unknown", "golden answer had no scored citations"
     assert_golden_answer(case, result["answer"])

@@ -3,19 +3,10 @@
 import Link from 'next/link'
 import { useState, useTransition } from 'react'
 import { registerAction } from '@/actions/register-action'
-
-const inputStyle: React.CSSProperties = {
-  display: 'block',
-  width: '100%',
-  background: 'rgba(255,255,255,0.05)',
-  border: '1px solid var(--color-border)',
-  borderRadius: '10px',
-  color: 'var(--color-foreground)',
-  padding: '10px 14px',
-  fontSize: '14px',
-  outline: 'none',
-  marginTop: '6px'
-}
+import { Alert, AlertDescription } from '@frontend/ui/components/alert'
+import { Button } from '@frontend/ui/components/button'
+import { Input } from '@frontend/ui/components/input'
+import { Label } from '@frontend/ui/components/label'
 
 export function RegisterForm() {
   const [error, setError] = useState<string | null>(null)
@@ -34,16 +25,9 @@ export function RegisterForm() {
   if (created) {
     return (
       <div className="space-y-4">
-        <div
-          className="rounded-xl px-4 py-3 text-sm"
-          style={{
-            background: 'rgba(115,223,240,0.08)',
-            border: '1px solid rgba(115,223,240,0.2)',
-            color: 'var(--color-primary)'
-          }}
-        >
-          Account created. It still needs to be activated before you can sign in.
-        </div>
+        <Alert>
+          <AlertDescription>Account created. It still needs to be activated before you can sign in.</AlertDescription>
+        </Alert>
         <p className="text-xs leading-relaxed" style={{ color: 'var(--color-muted-foreground)' }}>
           New accounts start deactivated. An administrator has to open the Django admin
           at <code style={{ color: 'var(--color-foreground)' }}>/admin/</code>, find
@@ -51,12 +35,9 @@ export function RegisterForm() {
           Running this template locally? You are the administrator — sign in with your
           superuser account and activate it yourself.
         </p>
-        <Link
-          href="/login"
-          className="btn-primary inline-flex !py-2.5 !text-sm"
-        >
-          Go to sign in
-        </Link>
+        <Button asChild>
+          <Link href="/login">Go to sign in</Link>
+        </Button>
       </div>
     )
   }
@@ -64,94 +45,56 @@ export function RegisterForm() {
   return (
     <form action={onSubmit} className="space-y-4">
       {error && (
-        <div
-          role="alert"
-          className="rounded-xl px-4 py-3 text-sm"
-          style={{
-            background: 'rgba(239,68,68,0.08)',
-            border: '1px solid rgba(239,68,68,0.2)',
-            color: 'var(--color-destructive)'
-          }}
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
-      <div
-        className="rounded-xl px-4 py-3 text-xs leading-relaxed"
-        style={{
-          background: 'rgba(251,191,36,0.06)',
-          border: '1px solid rgba(251,191,36,0.15)',
-          color: '#fbbf24'
-        }}
-      >
-        New accounts are created deactivated and must be activated by an administrator
+      <Alert className="border-amber-400/20 bg-amber-400/10 text-xs leading-relaxed text-amber-400">
+        <AlertDescription className="text-xs">
+          New accounts are created deactivated and must be activated by an administrator
         in the Django admin before they can sign in.
-      </div>
+        </AlertDescription>
+      </Alert>
 
-      <div>
-        <label
-          htmlFor="username"
-          className="text-xs font-medium"
-          style={{ color: 'var(--color-muted-foreground)' }}
-        >
-          Username
-        </label>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor="username">Username</Label>
+        <Input
           id="username"
           name="username"
           type="text"
           required
           autoComplete="username"
-          style={inputStyle}
         />
       </div>
 
-      <div>
-        <label
-          htmlFor="password"
-          className="text-xs font-medium"
-          style={{ color: 'var(--color-muted-foreground)' }}
-        >
-          Password
-        </label>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor="password">Password</Label>
+        <Input
           id="password"
           name="password"
           type="password"
           required
           minLength={8}
           autoComplete="new-password"
-          style={inputStyle}
         />
       </div>
 
-      <div>
-        <label
-          htmlFor="password_retype"
-          className="text-xs font-medium"
-          style={{ color: 'var(--color-muted-foreground)' }}
-        >
-          Repeat password
-        </label>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor="password_retype">Repeat password</Label>
+        <Input
           id="password_retype"
           name="password_retype"
           type="password"
           required
           minLength={8}
           autoComplete="new-password"
-          style={inputStyle}
         />
       </div>
 
-      <button
-        type="submit"
-        disabled={isPending}
-        className="btn-primary w-full !py-2.5 !text-sm"
-      >
+      <Button type="submit" disabled={isPending} className="w-full">
         {isPending ? 'Creating account…' : 'Create account'}
-      </button>
+      </Button>
 
       <p className="text-center text-xs" style={{ color: 'var(--color-muted-foreground)' }}>
         Already have an account?{' '}

@@ -24,8 +24,7 @@ def test_admin_dashboard_returns_summary() -> None:
     mock_documents.count.return_value = 10
     mock_documents.filter.return_value = mock_documents
 
-    with patch("rag.views.Document.objects.filter", return_value=mock_documents), \
-         patch("rag.views.IngestionReport.objects.filter", return_value=MagicMock()):
+    with patch("rag.views.Document.objects.filter", return_value=mock_documents):
         from rag.views import AdminDashboardView
         view = AdminDashboardView()
         request = MagicMock()
@@ -50,7 +49,7 @@ def test_corpus_readiness_is_org_scoped_and_explains_failures():
         role=Role.ADMIN,
     )
 
-    ready = Document.objects.create(
+    Document.objects.create(
         organization=organization, name="ready.txt", status=Status.READY
     )
     warning = Document.objects.create(

@@ -32,17 +32,17 @@ from langgraph.graph import END, START, StateGraph
 
 from rag.conf import get_config
 from rag.llm import get_chat_model
-from rag.storage import presigned_url
-from rag.usage import record_usage_async
 from rag.prompts import (
-    ANSWER_GENERATION_PROMPT,
     ANSWER_GENERATION_BEGINNER_PROMPT,
     ANSWER_GENERATION_DEEP_DIVE_PROMPT,
+    ANSWER_GENERATION_PROMPT,
     LANGUAGE_DETECTION_PROMPT,
     QUESTION_REPHRASING_PROMPT,
     SMALL_TALK_PROMPT,
 )
 from rag.retrieval import NoOrEmptyCollectionError, retrieve
+from rag.storage import presigned_url
+from rag.usage import record_usage_async
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,20 @@ def format_history(messages: list[dict]) -> str:
         pairs = list(zip(history[::2], history[1::2], strict=False))
         history = [message for pair in pairs[::-1] for message in pair]
     return "\n".join(f"{message['role']}: {message['content']}" for message in history)
+
+
+REFUSAL_PHRASE = "I can't answer that from the information I have."
+
+
+def is_refusal(text: str) -> bool:
+    """True when the model declined to answer from the context.
+
+    The prompt instructs the model to say the refusal phrase exactly. Citations
+    must not accompany it: the retrieved chunks were not used, and listing them
+    as sources implies the opposite of what the answer says.
+    """
+    normalized = text.replace("\u2019", "'").strip().lower()
+    return REFUSAL_PHRASE.lower() in normalized and len(normalized) < len(REFUSAL_PHRASE) + 200
 
 
 def document_to_citation(document: Document) -> dict:
@@ -307,9 +321,10 @@ async def _generate_node(state: AnswerGraphState, config=None) -> dict:
         }
     answer = getattr(response, "content", response)
     answer = answer if isinstance(answer, str) else str(answer)
+    citations = [] if is_refusal(answer) else [document_to_citation(d) for d in state["documents"]]
     return {
         "answer_text": answer,
-        "citations": [document_to_citation(d) for d in state["documents"]],
+        "citations": citations,
         "finish_reason": "stop",
     }
 
@@ -525,11 +540,13 @@ async def astream_answer(
         "language": language,
     }
     last_chunk = None
+    streamed: list[str] = []
     try:
         async for chunk in chain.astream(payload, config=config):
             last_chunk = chunk
             token = getattr(chunk, "content", "")
             if token:
+                streamed.append(token)
                 yield {"type": "token", "token": token}
     except Exception:
         logger.exception("Answer streaming failed.")
@@ -537,4 +554,8 @@ async def astream_answer(
         return
 
     await _record_query_usage({"organization_id": organization_id}, last_chunk)
+    if is_refusal("".join(streamed)):
+        # Sources were sent before the answer; retract them now that the model
+        # has declined, so a refusal is not shown with unrelated citations.
+        yield {"type": "citations", "citations": []}
     yield {"type": "done", "finish_reason": "stop"}

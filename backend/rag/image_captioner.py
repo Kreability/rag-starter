@@ -22,7 +22,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from rag import conf
-from rag.metrics import get_metrics
 from rag.resilience import retry
 from rag.storage import upload_fileobj
 from rag.usage import record_usage_async
@@ -161,7 +160,7 @@ async def caption_images(
                 return piece
 
     results = await asyncio.gather(*(process(p) for p in image_pieces))
-    image_map = {id(p): r for p, r in zip(image_pieces, results)}
+    image_map = {id(p): r for p, r in zip(image_pieces, results, strict=True)}
     return [image_map.get(id(p), p) for p in pieces]
 
 

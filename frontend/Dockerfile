@@ -5,12 +5,35 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
     PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH
 
-# `corepack` ships the pnpm version pinned by the repo rather than a global one.
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# The pnpm version is pinned here, not in package.json's "packageManager".
+# Do NOT use `pnpm@latest`: that tracks whatever pnpm published most recently,
+# so an unrelated upstream major bump changes the toolchain under a
+# lockfile-pinned workspace. A "packageManager" field would also make pnpm
+# self-manage — it installs that pnpm as a dependency and rewrites
+# pnpm-lock.yaml with ~160 lines of @pnpm/exe entries for every platform, and
+# the `web` container bind-mounts this workspace and installs on every boot,
+# so that dirtied a tracked file as a side effect of `docker compose up`.
+ARG PNPM_VERSION=12.6.0
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate
 
 WORKDIR /app
 
 EXPOSE 3000
+
+# --- development: workspace + toolchain, sources bind-mounted at run time ----
+# The compose `web` service targets this stage and overrides the command with
+# `pnpm install -r && pnpm --filter web dev`.
+#
+# It must run as root. Docker creates the anonymous node_modules volumes owned
+# by root, and this stage's install has to write into them; inheriting the
+# production stage's `USER node` (uid 1000) instead made every symlink fail with
+# "Permission denied (os error 13)" and the container restart-looped.
+FROM base AS development
+
+# Nothing is pre-installed here on purpose: `web` bind-mounts ./frontend over
+# /app and masks every node_modules with anonymous volumes, so anything
+# installed at build time would be discarded at run time.
 
 # --- builder: installs the whole workspace and produces a standalone build ----
 FROM base AS builder

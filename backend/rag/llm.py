@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 
+from langchain_core.embeddings import Embeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from rag.conf import get_config
@@ -54,7 +55,72 @@ def get_embedder():
         logger.info("Using local FastEmbed embedder: %s", settings.local_model)
         return FastEmbedEmbeddings(model_name=settings.local_model)
 
+    if settings.provider.lower() == "nvidia":
+        # One gateway key for everything: reuse the chat key unless the
+        # embedder is given its own.
+        api_key = settings.api_key.get_secret_value() or get_config().llm.api_key.get_secret_value()
+        return NvidiaEmbeddings(
+            model=settings.model,
+            api_key=api_key,
+            base_url=settings.base_url or "https://integrate.api.nvidia.com/v1",
+            batch_size=settings.batch_size,
+            timeout=settings.timeout,
+        )
+
     return _openai_embedder(settings)
+
+
+class NvidiaEmbeddings(Embeddings):
+    """NVIDIA NIM retrieval embeddings (e.g. `nvidia/nv-embedqa-e5-v5`).
+
+    The endpoint is OpenAI-compatible, but asymmetric retrieval models require
+    `input_type` ("query" for questions, "passage" for documents) and reject
+    requests without it, which `OpenAIEmbeddings` cannot send. Using the wrong
+    type silently degrades retrieval quality, so queries and documents are
+    embedded through separate paths.
+    """
+
+    def __init__(self, *, model: str, api_key: str, base_url: str, batch_size: int = 64, timeout: float = 120.0):
+        from openai import AsyncOpenAI, OpenAI
+
+        if not api_key:
+            raise ValueError("Set LLM_API_KEY (or EMBEDDER_API_KEY) when EMBEDDER_PROVIDER=nvidia.")
+        self.model = model
+        # NIM caps a request at 50-ish inputs; stay conservative.
+        self.batch_size = max(1, min(batch_size, 50))
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=3)
+        self._aclient = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=3)
+
+    def _kwargs(self, input_type: str) -> dict:
+        return {
+            "model": self.model,
+            "encoding_format": "float",
+            "extra_body": {"input_type": input_type, "truncate": "END"},
+        }
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            response = self._client.embeddings.create(input=batch, **self._kwargs("passage"))
+            vectors.extend(item.embedding for item in response.data)
+        return vectors
+
+    def embed_query(self, text: str) -> list[float]:
+        response = self._client.embeddings.create(input=[text], **self._kwargs("query"))
+        return response.data[0].embedding
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            response = await self._aclient.embeddings.create(input=batch, **self._kwargs("passage"))
+            vectors.extend(item.embedding for item in response.data)
+        return vectors
+
+    async def aembed_query(self, text: str) -> list[float]:
+        response = await self._aclient.embeddings.create(input=[text], **self._kwargs("query"))
+        return response.data[0].embedding
 
 
 def _openai_embedder(settings) -> OpenAIEmbeddings:

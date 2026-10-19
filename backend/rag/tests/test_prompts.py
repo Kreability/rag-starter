@@ -6,8 +6,6 @@ and produce safe output. These are contract tests for prompt changes.
 
 from __future__ import annotations
 
-import pytest
-
 from rag.prompts import (
     ANSWER_GENERATION_PROMPT,
     LANGUAGE_DETECTION_PROMPT,
