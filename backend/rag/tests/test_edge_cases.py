@@ -108,7 +108,7 @@ class TestMixedContentTypes:
             pieces, document_id="d1", owner_id=1, document_name="mixed.txt"
         )
         assert len(documents) == 3
-        assert all(d.metadata["type"] == t for d, t in zip(documents, ["TEXT", "TABLE", "TEXT"]))
+        assert all(d.metadata["type"] == t for d, t in zip(documents, ["TEXT", "TABLE", "TEXT"], strict=True))
 
     def test_empty_table_not_skipped_if_has_words(self):
         table = "| header |\n| --- |\n| value |"
